@@ -18,12 +18,15 @@ from munch import Munch
 from itertools import chain
 from . import transforms
 from . import utils
+import joblib
 
 
-data_folder_path = os.path.join(os.path.dirname(__file__), 'data')
-_babi_1K_path = os.path.join(data_folder_path, 'tasks_1-20_v1-2', 'en')
-_babi_10K_path = os.path.join(data_folder_path, 'tasks_1-20_v1-2', 'en-10k')
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
+_babi_1K_path = os.path.join(data_dir_path, 'tasks_1-20_v1-2', 'en')
+_babi_10K_path = os.path.join(data_dir_path, 'tasks_1-20_v1-2', 'en-10k')
+joblib_cache_dir_path = os.path.join(data_dir_path, 'joblib_cache')
+memory = joblib.Memory(cachedir=joblib_cache_dir_path)
+
 
 
 def _read_babi_lines(path):
@@ -61,12 +64,14 @@ def load_task(task_num, version, folder_path):
     return output
 
 
-def load_tasks(version, folder_path):
+def load_tasks(version, folder_path, task_subset=None):
     """
     Load the QA tuples for all tasks.
     """
     output = []
     for i in range(1, 21):
+        if task_subset is not None and i not in task_subset:
+            continue
         output.extend(load_task(i, version, folder_path))
     return output
 
@@ -236,6 +241,11 @@ def add_nn_X_y(data, word_to_id, X_padding):
     #     y_test=test_answers[test_indices]
     # )
 
+def get_time_shifted(sequences):
+    # TODO: Start, pad, etc. should be constants.
+    start_tokens = np.zeros((sequences.shape[0], 1)) + 2  # <START> == 2
+    return np.concatenate([start_tokens, sequences[:, :-1]], axis=1)
+
 
 def get_train_val_test_indices(num_rows, val_ratio=0.25, test_ratio=0.25):
     """Return indices of the train, test, and validation sets."""
@@ -248,10 +258,12 @@ def get_train_val_test_indices(num_rows, val_ratio=0.25, test_ratio=0.25):
     return train_indices, val_indices, test_indices
     
 
-def get_babi_data(use_10k=False):
+@memory.cache
+def get_babi_data(task_subset=None, use_10k=False):
+
     babi_path = _babi_10K_path if use_10k else _babi_1K_path
-    train_tasks = load_tasks('train', babi_path)
-    test_tasks = load_tasks('test', babi_path)
+    train_tasks = load_tasks('train', babi_path, task_subset)
+    test_tasks = load_tasks('test', babi_path, task_subset)
     data = get_train_val_test(train_tasks, test_tasks)
 
     data.word_to_vec, data.word_to_id, data.embedding_matrix = get_embeddings(chain(*data.values()))
@@ -267,23 +279,36 @@ def get_babi_data(use_10k=False):
         data.X_train_questions, data.X_val_questions, data.X_test_questions)
     data.y_train, data.y_val, data.y_test = align_padding(
         data.y_train, data.y_val, data.y_test)
+        
+    data.X_train_decoder = get_time_shifted(data.y_train)
+    data.X_val_decoder = get_time_shifted(data.y_val)
+    data.X_test_decoder = get_time_shifted(data.y_test)
     
     return data
-    
-small_babi = get_babi_data()
-utils.save_data(small_babi, 'babi_1K_data.pickle')
 
-print('Done small.')
 
-big_babi = get_babi_data(use_10k=True)
-utils.save_data(big_babi, 'babi_10k_data.pickle')
+data = get_babi_data(task_subset=[1, 20])
+
+
+
+# print(len(data.X_train_questions))
+# 
+# print(id_lists_to_texts(data.X_train_questions, data.id_to_word))
+
+# small_babi = get_babi_data()
+# utils.save_data(small_babi, 'babi_1K_data.pickle')
+# 
+# print('Done small.')
+# 
+# big_babi = get_babi_data(use_10k=True)
+# utils.save_data(big_babi, 'babi_10k_data.pickle')
 
 # TODO: Decorator that takes a cache name and will cache the output for a given 
 # set of args. It should also take an optional flag to recompute data. Or it could
 # hash the source code file to see if anything has changed. 
     
 
-get_babi_data()
+# get_babi_data()
     
 # train_tasks = load_tasks('train', _babi_1K_path)[:100]
 # test_tasks = load_tasks('test', _babi_1K_path)[:100]

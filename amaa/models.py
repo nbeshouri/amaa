@@ -17,6 +17,7 @@ import os
 import numpy as np
 
 
+
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
 
 
@@ -109,11 +110,6 @@ def predict(encoder_model, decoder_model, stories, questions, max_answer_length)
         pred_list.append(preds)
     return np.concatenate(pred_list, axis=-1)
         
-
-def score_on_babi_tasks(model):
-    """Return a Series of task specific scores."""
-    
-
 
 def train_model(model, data, epochs):
     # Train 

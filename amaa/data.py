@@ -72,7 +72,7 @@ def load_tasks(version, folder_path, task_subset=None):
     for i in range(1, 21):
         if task_subset is not None and i not in task_subset:
             continue
-        output.extend(load_task(i, version, folder_path))
+        output.append(load_task(i, version, folder_path))
     return output
 
 
@@ -137,33 +137,52 @@ def id_lists_to_texts(id_lists, id_to_word):
     return [ids_to_text(ids, id_to_word) for ids in id_lists]
 
 
-def get_train_val_test(train_sqas, test_sqas):
+def answer_ids_to_text(ids, id_to_word):
+    text = ids_to_text(ids, id_to_word)
+    text = text.split('<EOS>')[0]
+    return text.strip()
+
+def answer_id_lists_to_texts(id_lists, id_to_word):
+    return [answer_ids_to_text(ids, id_to_word) for ids in id_lists]
+
+
+def get_train_val_test(train_sqas, test_sqas, task_subset=None):
+    
+    
+    if task_subset == None:
+        task_subset = range(1, 21)
+    
+    flat_train_sqas = chain(*train_sqas)
+    flat_val_sqas = []
+    flat_test_sqas = []
+    test_sqas = np.array(test_sqas)
+    for task_sqas, task_num in zip(test_sqas, task_subset):        
+        _, val_indices, test_indices = get_train_val_test_indices(
+            len(task_sqas), val_ratio=0.50, test_ratio=0.50, seed=42 + task_num)        
+        flat_val_sqas.extend(task_sqas[val_indices])
+        flat_test_sqas.extend(task_sqas[test_indices])
     
     def process_sqas(sqas):
         token_sqas = map(transforms.tokenize_texts, zip(*sqas))
         token_sqas = tuple(map(np.array, token_sqas))
         return token_sqas
     
-    # train_stories, train_questions, train_answers = tuple(map(np.array, zip(*train_sqas)))
-    # test_stories, test_questions, test_answers = tuple(map(np.array, zip(*test_sqas))) 
-    
-    train_stories, train_questions, train_answers = process_sqas(train_sqas)
-    test_stories, test_questions, test_answers = process_sqas(test_sqas)
-    
-    _, val_indices, test_indices = get_train_val_test_indices(len(test_stories), val_ratio=0.50, test_ratio=0.50)
+    train_stories, train_questions, train_answers = process_sqas(flat_train_sqas)
+    test_stories, test_questions, test_answers = process_sqas(flat_test_sqas)
+    val_stories, val_questions, val_answers = process_sqas(flat_test_sqas)
     
     data = Munch(
         X_train_stories=train_stories,
         X_train_questions=train_questions,
         y_train=train_answers,
         
-        X_val_stories=test_stories[val_indices],
-        X_val_questions=test_questions[val_indices],
-        y_val=test_answers[val_indices],
+        X_val_stories=val_stories,
+        X_val_questions=val_questions,
+        y_val=val_answers,
         
-        X_test_stories=test_stories[test_indices],
-        X_test_questions=test_questions[test_indices],
-        y_test=test_answers[test_indices]
+        X_test_stories=test_stories,
+        X_test_questions=test_questions,
+        y_test=test_answers
     )
     
     return data
@@ -247,9 +266,9 @@ def get_time_shifted(sequences):
     return np.concatenate([start_tokens, sequences[:, :-1]], axis=1)
 
 
-def get_train_val_test_indices(num_rows, val_ratio=0.25, test_ratio=0.25):
+def get_train_val_test_indices(num_rows, val_ratio=0.25, test_ratio=0.25, seed=42):
     """Return indices of the train, test, and validation sets."""
-    rand = np.random.RandomState(42)
+    rand = np.random.RandomState(seed)
     indices = rand.permutation(range(num_rows))
     train_ratio = 1 - val_ratio - test_ratio
     train_indices = indices[:int(len(indices) * train_ratio)]
@@ -259,14 +278,25 @@ def get_train_val_test_indices(num_rows, val_ratio=0.25, test_ratio=0.25):
     
 
 @memory.cache
-def get_babi_data(task_subset=None, use_10k=False):
+def get_babi_embeddings(use_10k=False, min_vocab_size=0):
+    # Calculate embedding matrix with suitable vocab for all
+    # tasks. I don't calculate a task specific vocab because
+    # I want the word indices to be the same in all task data
+    # sets.
+    babi_path = _babi_10K_path if use_10k else _babi_1K_path
+    train_tasks = load_tasks('train', babi_path)
+    test_tasks = load_tasks('test', babi_path)
+    tokenized_texts = map(transforms.to_tokens, chain(*chain(*chain(train_tasks, test_tasks))))
+    return get_embeddings(tokenized_texts, min_vocab_size=min_vocab_size)
 
+
+@memory.cache
+def get_babi_data(task_subset=None, use_10k=False):
     babi_path = _babi_10K_path if use_10k else _babi_1K_path
     train_tasks = load_tasks('train', babi_path, task_subset)
     test_tasks = load_tasks('test', babi_path, task_subset)
-    data = get_train_val_test(train_tasks, test_tasks)
-
-    data.word_to_vec, data.word_to_id, data.embedding_matrix = get_embeddings(chain(*data.values()))
+    data = get_train_val_test(train_tasks, test_tasks, task_subset)
+    data.word_to_vec, data.word_to_id, data.embedding_matrix = get_babi_embeddings(use_10k)
     data.id_to_word = {id: word for word, id in data.word_to_id.items()}
     
     keys = [key for key in data.keys() if 'X_' in key or 'y_' in key]
@@ -285,10 +315,14 @@ def get_babi_data(task_subset=None, use_10k=False):
     data.X_test_decoder = get_time_shifted(data.y_test)
     
     return data
+    
 
 
-data = get_babi_data(task_subset=[1, 20])
 
+
+
+
+# data = get_babi_data(task_subset=[1, 20])
 
 
 # print(len(data.X_train_questions))

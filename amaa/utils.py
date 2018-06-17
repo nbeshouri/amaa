@@ -55,7 +55,20 @@ def save_data(data, file_name, compress=3):
     path = os.path.join(data_dir_path, file_name)
     archive_data(file_name)
     joblib.dump(data, path, compress=compress)
+    
+    
+def save_weights(model, prefix):
+    file_name = prefix + '_weights.hdf5'
+    path = os.path.join(data_dir_path, file_name)
+    archive_data(file_name)
+    model.save_weights(path)
 
+    
+def load_weights(model, prefix):
+    file_name = prefix + '_weights.hdf5'
+    path = os.path.join(data_dir_path, file_name)
+    model.load_weights(path)
+    
 
 def archive_data(file_name):
     """Move a file in the data folder to the archive folder if the file exists."""

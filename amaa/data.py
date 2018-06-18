@@ -19,6 +19,7 @@ from itertools import chain
 from . import transforms
 from . import utils
 import joblib
+import numpy as np
 
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -168,8 +169,8 @@ def get_train_val_test(train_sqas, test_sqas, task_subset=None):
         return token_sqas
     
     train_stories, train_questions, train_answers = process_sqas(flat_train_sqas)
+    val_stories, val_questions, val_answers = process_sqas(flat_val_sqas)
     test_stories, test_questions, test_answers = process_sqas(flat_test_sqas)
-    val_stories, val_questions, val_answers = process_sqas(flat_test_sqas)
     
     data = Munch(
         X_train_stories=train_stories,
@@ -226,8 +227,11 @@ def texts_to_ids(texts, word_to_id, max_sequence_length=None):
     return X
 
 
-def align_padding(*id_matrices):
-    max_row_len = max(matrix.shape[1] for matrix in id_matrices)
+def align_padding(*id_matrices, forced_length=None):
+    if forced_length is None:
+        max_row_len = max(matrix.shape[1] for matrix in id_matrices)
+    else:
+        max_row_len = forced_length
     output = []
     for matrix in id_matrices:
         padding_needed = max_row_len - matrix.shape[1]
@@ -291,24 +295,30 @@ def get_babi_embeddings(use_10k=False, min_vocab_size=0):
 
 
 @memory.cache
-def get_babi_data(task_subset=None, use_10k=False):
+def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None, 
+                  forced_question_length=None, forced_answer_length=None):
+    
     babi_path = _babi_10K_path if use_10k else _babi_1K_path
     train_tasks = load_tasks('train', babi_path, task_subset)
     test_tasks = load_tasks('test', babi_path, task_subset)
     data = get_train_val_test(train_tasks, test_tasks, task_subset)
+        
     data.word_to_vec, data.word_to_id, data.embedding_matrix = get_babi_embeddings(use_10k)
     data.id_to_word = {id: word for word, id in data.word_to_id.items()}
     
+    # Convert lists of texts to lists of lists of word ids.
     keys = [key for key in data.keys() if 'X_' in key or 'y_' in key]
     for key in keys:
         data[key] = texts_to_ids(data[key], data.word_to_id)
     
     data.X_train_stories, data.X_val_stories, data.X_test_stories = align_padding(
-        data.X_train_stories, data.X_val_stories, data.X_test_stories)
+        data.X_train_stories, data.X_val_stories, data.X_test_stories, 
+        forced_length=forced_story_length)
     data.X_train_questions, data.X_val_questions, data.X_test_questions = align_padding(
-        data.X_train_questions, data.X_val_questions, data.X_test_questions)
+        data.X_train_questions, data.X_val_questions, data.X_test_questions, 
+        forced_length=forced_question_length)
     data.y_train, data.y_val, data.y_test = align_padding(
-        data.y_train, data.y_val, data.y_test)
+        data.y_train, data.y_val, data.y_test, forced_length=forced_answer_length)
         
     data.X_train_decoder = get_time_shifted(data.y_train)
     data.X_val_decoder = get_time_shifted(data.y_val)

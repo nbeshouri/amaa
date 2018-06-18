@@ -11,12 +11,13 @@ from keras.layers import (
     RepeatVector,
     Lambda, 
     TimeDistributed,
-    LSTM
+    LSTM,
+    Reshape
 )
 from keras import backend as K
 import os
 import numpy as np
-
+import socket
 
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -28,7 +29,7 @@ data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
 
 
 def build_baseline_model(story_length, question_length, answer_length, 
-                         embedding_matrix, recur_size=256):        
+                         embedding_matrix, recur_size=256, recurrent_layers=1):        
     
     story_input = Input(shape=(story_length,), name='story_input')
     question_input = Input(shape=(question_length,), name='question_input')
@@ -39,27 +40,54 @@ def build_baseline_model(story_length, question_length, answer_length,
                                  weights=[embedding_matrix],
                                  trainable=False,
                                  name='embedding_lookup')
-                                 
-    encoder = Bidirectional(GRU(recur_size // 2), name='encoder')
-    decoder = GRU(recur_size, return_state=True, return_sequences=True, name='decoder')
+                                             
+    encoders = [] 
+    for i in range(recurrent_layers):
+        return_seq = False if i == recurrent_layers - 1 else True
+        encoders.append(Bidirectional(GRU(recur_size // 2, return_sequences=return_seq, 
+                        name=f'encoder{i}')))
+                        
+    decoders = []
+    for i in range(recurrent_layers):
+        decoders.append(GRU(recur_size, return_state=True, return_sequences=True, name=f'decoder{i}'))
+    
     word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', name='word_predictor')
     
     # Encode story.
     x = embedding_lookup(story_input)
-    encoded_story = encoder(x)  # <--- this is the line that causes seg fault.
-
+    get_last_time_step = Lambda(lambda t: t[:, -1,])
+    encoder_states = []
+    for encoder in encoders:
+        x = encoder(x)  # <--- this is the line that causes seg fault.
+        # Here I'm slicing off the last time step to feed as the initial
+        # state to the decoder layers. I could get these back in the 
+        # correct shape via return_state=True param, but that doesn't 
+        # play nice with the bidirectional layer. Also, I'm assuming 
+        # that in keras's GRU implementation, output and state are the 
+        # same, which they are in the Colah blog post.
+        if encoder is not encoders[-1]:
+            encoder_state = get_last_time_step(x)
+        else:
+            encoder_state = x
+        encoder_states.append(encoder_state)
+    
     # Encode question.
     x = embedding_lookup(question_input)
-    zeros = K.zeros_like(encoded_story)
+    zeros = K.zeros_like(encoder_states[-1])
     state_1 = K.slice(zeros, (0, 0), (-1, recur_size // 2))
     state_2 = K.slice(zeros, (0, recur_size // 2), (-1, -1))
-    encoded_question = encoder(x, initial_state=[state_1, state_2])
+    
+    # encoded_questions = []
+    for encoder in encoders:
+        x = encoder(x, initial_state=[state_1, state_2])
+    encoded_question = x
     
     # Decode answer.
     x = embedding_lookup(decoder_input)
     repeated_question = RepeatVector(answer_length)(encoded_question)
     x = concatenate([x, repeated_question])
-    x, _ = decoder(x, initial_state=encoded_story)
+    for decoder, encoder_state in zip(decoders, encoder_states):
+        x, _ = decoder(x, initial_state=encoder_state)
     outputs = TimeDistributed(word_predictor)(x)
     
     # Build training model.
@@ -71,22 +99,44 @@ def build_baseline_model(story_length, question_length, answer_length,
     
     # Build encoder model.
     inputs = story_input, question_input
-    outputs = encoded_story, encoded_question
+    outputs =  encoder_states + [encoded_question]
     encoder_model = Model(inputs=inputs, outputs=outputs)
     
     # Build decoder model.
     decoder_prev_predict_input = Input(shape=(1,), name='decoder_prev_predict_input')
-    decoder_state_input = Input(shape=(recur_size,), name='decoder_state_input')
+    
     decoder_question_input = Input(shape=(recur_size,), name='decoder_question_input')
+    
+    decoder_state_inputs = [Input(shape=(recur_size,), name=f'decoder_state_input_{i}') 
+                            for i in range(recurrent_layers)]    
     
     x = embedding_lookup(decoder_prev_predict_input)
     repeated_question = RepeatVector(1)(decoder_question_input)
     x = concatenate([x, repeated_question])
-    x, decoder_state = decoder(x, initial_state=decoder_state_input)
+    
+    decoder_states = []
+    for decoder, decoder_state_input in zip(decoders, decoder_state_inputs):
+        x, decoder_state = decoder(x, initial_state=decoder_state_input)
+        decoder_states.append(decoder_state)
     x = word_predictor(x)
-    inputs = decoder_prev_predict_input, decoder_state_input, decoder_question_input
-    outputs = x, decoder_state
+    
+    inputs = [decoder_prev_predict_input, decoder_question_input] + decoder_state_inputs
+    outputs = [x] + decoder_states
     decoder_model = Model(inputs=inputs, outputs=outputs)
+    
+    
+    
+    # x = embedding_lookup(decoder_input)
+    # repeated_question = RepeatVector(answer_length)(encoded_questions[-1])
+    # x = concatenate([x, repeated_question])
+    # get_last_time_step = Lambda(lambda t: t[:, -1,])
+    # for decoder, encoded_story in zip(decoders, encoded_stories):
+    #     if len(encoded_story.shape) > 2:
+    #         encoded_story = get_last_time_step(encoded_story)
+    #     x, _ = decoder(x, initial_state=encoded_story)
+    # outputs = TimeDistributed(word_predictor)(x)
+    # 
+    
     
     return train_model, encoder_model, decoder_model
 
@@ -213,13 +263,13 @@ def get_gate_vectors(input_length, fact_vectors, memory_vector, question_vector,
 
 def predict(encoder_model, decoder_model, stories, questions, max_answer_length):
     """Returns the predictions as indicies."""
-    encoded_stories, encoded_questions = encoder_model.predict([stories, questions])
-    batch_size = encoded_stories.shape[0]
+    *encoded_stories, encoded_questions = encoder_model.predict([stories, questions])
+    batch_size = encoded_stories[0].shape[0]
     preds = np.zeros((batch_size, 1)) + 2
-    decoder_state = encoded_stories
+    decoder_states = encoded_stories
     pred_list = []
     for i in range(max_answer_length):
-        preds, decoder_state = decoder_model.predict([preds, decoder_state, encoded_questions])
+        preds, *decoder_states = decoder_model.predict([preds, encoded_questions] + decoder_states)
         preds = np.argmax(preds, axis=-1)
         pred_list.append(preds)
     return np.concatenate(pred_list, axis=-1)
@@ -227,7 +277,7 @@ def predict(encoder_model, decoder_model, stories, questions, max_answer_length)
 
 def train_model(model, data, epochs):
     # Train 
-    checkpoint_path = os.path.join(data_dir_path, 'temp_weights.hdf5')    
+    checkpoint_path = os.path.join(data_dir_path, f'temp_weights_{socket.gethostname()}.hdf5')    
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
     checkpointer = ModelCheckpoint(filepath=checkpoint_path, save_best_only=True, save_weights_only=True, monitor='val_loss')

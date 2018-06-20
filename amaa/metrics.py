@@ -59,6 +59,7 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
             row.loc['task_number'] = task_num
             row.loc['trained_on'] = 'single'
             row.loc['10k'] = use_10k
+            print(row)
             rows.append(row)
             # K.clear_session()
             
@@ -99,6 +100,7 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
             row.loc['task_number'] = task_num
             row.loc['trained_on'] = 'multi'
             row.loc['10k'] = use_10k
+            print(row)
             rows.append(row)        
     
     # K.clear_session()

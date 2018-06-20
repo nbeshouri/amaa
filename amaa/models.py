@@ -12,7 +12,9 @@ from keras.layers import (
     Lambda, 
     TimeDistributed,
     LSTM,
-    Reshape
+    Reshape,
+    Flatten,
+    Permute
 )
 from keras import backend as K
 import os
@@ -129,38 +131,27 @@ def build_baseline_model(story_length, question_length, answer_length,
     
     inputs = [decoder_prev_predict_input, decoder_question_input] + decoder_state_inputs
     outputs = [x] + decoder_states
-    decoder_model = Model(inputs=inputs, outputs=outputs)
-    
-    
-    
-    # x = embedding_lookup(decoder_input)
-    # repeated_question = RepeatVector(answer_length)(encoded_questions[-1])
-    # x = concatenate([x, repeated_question])
-    # get_last_time_step = Lambda(lambda t: t[:, -1,])
-    # for decoder, encoded_story in zip(decoders, encoded_stories):
-    #     if len(encoded_story.shape) > 2:
-    #         encoded_story = get_last_time_step(encoded_story)
-    #     x, _ = decoder(x, initial_state=encoded_story)
-    # outputs = TimeDistributed(word_predictor)(x)
-    # 
-    
+    decoder_model = Model(inputs=inputs, outputs=outputs)    
     
     return train_model, encoder_model, decoder_model
+
+
+
 
 
 #
 # DMN MODEL
 #
 
-
+    
 def build_dmn_model(story_length, question_length, answer_length, 
-                    embedding_matrix, recur_size=256, recurrent_layers=1,
-                    iterations=3, gate_dense_size=128):
+                           embedding_matrix, recur_size=256, recurrent_layers=1,
+                           iterations=3, gate_dense_size=128):
     
     story_input = Input(shape=(story_length,), name='story_input')
     question_input = Input(shape=(question_length,), name='question_input')
-    get_last_time_step = Lambda(lambda t: t[:, -1,])
-    get_gate_weights = Lambda(lambda t: t[:, :, 0])
+    # get_last_time_step = Lambda(lambda t: t[:, -1,])
+    # get_gate_weights = Lambda(lambda t: t[:, :, 0])
     
     decoder_input = Input(shape=(answer_length,), name='decoder_input')
     embedding_lookup = Embedding(embedding_matrix.shape[0],
@@ -169,103 +160,74 @@ def build_dmn_model(story_length, question_length, answer_length,
                                  trainable=False,
                                  name='embedding_lookup')
     
-    
-    # TODO: This should be bidirectional, but you'll need to deal with
-    # the state stuff. It also might not make sense to reuse it... though
-    # then any direct similarity between the fact vectors and the question
-    # vects ceases to make sense. But still, keeping them separate and
-    # using a simpler attention mechanism. We'll just have to see.
-    
-    # input_gru = Bidirectional(GRU(recur_size // 2, return_sequences=True))
-    
-    # Declare reused layers.
+    # Declare major layers.
     input_gru = GRU(recur_size, return_sequences=True, return_state=True)
     ep_gru = GRU(recur_size)
     mem_gru = GRU(recur_size)
     output_gru = GRU(recur_size, return_sequences=True, return_state=True)
-    gate_dense1 = TimeDistributed(Dense(gate_dense_size, activation='tanh'))
-    gate_dense2 = TimeDistributed(Dense(1, activation='sigmoid'))  # Sigmoid makes more sense.
-    word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', name='word_predictor')
-
+    gate_dense1 = Dense(gate_dense_size, activation='tanh')
+    gate_dense2 = Dense(1, activation='sigmoid')  # Sigmoid makes more sense.
+    
+    word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', 
+                           name='word_predictor')
+    flatten = Flatten()
+    repeat_stroy_len_times = RepeatVector(story_length)
+    repeat_recur_size_times = RepeatVector(recur_size)
+    permute = Permute((2, 1))
+    add_time_dim = RepeatVector(1)
+    
     # Encode story.
     x = embedding_lookup(story_input)
     fact_vectors, state = input_gru(x)
     
     # Encode question.
     x = embedding_lookup(question_input)
-    x, _ = input_gru(x, initial_state=K.zeros_like(state))
-    question_vector = get_last_time_step(x)
+    _, question_vector = input_gru(x, initial_state=K.zeros_like(state))
     
-    
-    # TODO: You can implement the per sentence masking by passing in a
-    # mask of 0s for all put '.' characters and using these to weight the 
-    # gate weights. In essense, where there's no gate weight, the gru step
-    # is a no op. (EDIT: No, you'll have implement that yourself, but it's
-    # totally doable.)
-    
-    # NOTE: These lambdas are going to kill masks unless you pass in 
-    # a mask value when you create them. This may or may not matter.
-    # The masking of zeros doesn't seem to help much in the standard model
-    # where it is at least possible. 
-    
+    # Generate memory vector.
     memory_vector = question_vector
+    
     for iteration in range(iterations):
         # Calculate the weights for the gate vectors.
-        memory_vectors = RepeatVector(story_length)(memory_vector)
-        question_vectors = RepeatVector(story_length)(question_vector)
+        memory_vectors = repeat_stroy_len_times(memory_vector)
+        question_vectors = repeat_stroy_len_times(question_vector)
         pointwise1 = layers.multiply([fact_vectors, question_vectors])
         pointwise2 = layers.multiply([fact_vectors, memory_vectors])
-        delta1 = K.square(layers.subtract([fact_vectors, question_vectors]))
-        delta2 = K.square(layers.subtract([fact_vectors, memory_vectors]))
-        # These are dot products, but I couldn't get the built in dot products
-        # to work with three axis tensors.
-        # TODO: Try square instead of abs.
-        # dot1 = K.sum(fact_vectors * memory_vectors, axis=-1, keepdims=True)
-        # dot2 = K.sum(fact_vectors * question_vectors, axis=-1, keepdims=True)
-        # gate_feature_vectors = concatenate([fact_vectors, memory_vectors, question_vectors])
-        gate_feature_vectors = concatenate([fact_vectors, memory_vectors, question_vectors, delta1, delta2, pointwise1, pointwise2])
+        delta1 = layers.subtract([fact_vectors, question_vectors])
+        delta1 = layers.multiply([delta1, delta1])
+        delta2 = layers.subtract([fact_vectors, memory_vectors])
+        delta2 = layers.multiply([delta2, delta2])
 
-
-        # gate_feature_vectors = concatenate([fact_vectors, memory_vectors, question_vectors, pointwise1, pointwise2, delta1, delta2])
-        # feature_vectors = layers.concatenate([fact_vectors, memory_vectors, question_vectors, pointwise1, pointwise2, delta1, delta2])
-
+        gate_feature_vectors = concatenate([fact_vectors, memory_vectors, question_vectors, 
+                                            pointwise1, pointwise2, delta1, delta2])
         x = gate_dense1(gate_feature_vectors)
         x = gate_dense2(x)
-        gate_weights = get_gate_weights(x)
-        
-        
-        get_ith_time_step = [Lambda(lambda t: t[:, i:i + 1]) for i in range(story_length)]
-        
-        # Compute episode for this iteration.
-        state = None
-        for i in range(story_length):
-            fact_vector = get_ith_time_step[i](fact_vectors)  # (?, recur_size)
-            x = ep_gru(fact_vector, initial_state=state)
-            gate_weight = get_ith_time_step[i](gate_weights)
-            if state is None:
-                state = Lambda(lambda t: t * gate_weight)(x)  # Such lambdas can't be serialized.
-            else:
-                state = Lambda(lambda t: t * gate_weight + (1 - gate_weight) * state)(x)
-        episode = state
-        
-        episode = Reshape((1, recur_size))(episode)
-        
-        # Use episode to update episodic memory.
+        x = flatten(x)
+        x = repeat_recur_size_times(x)
+        gate_weights = permute(x)
+    
+        # Calculate the episode vector for this iteration.
+        weighted_fact_vectors = layers.multiply([fact_vectors, gate_weights])
+        episode = ep_gru(weighted_fact_vectors)
+        episode = add_time_dim(episode)
+    
+        # Incorporate episode into memory.
         memory_vector = mem_gru(episode, initial_state=memory_vector)
-        
+    
+    # Decode answer.    
     repeated_question = RepeatVector(answer_length)(question_vector)
     x = embedding_lookup(decoder_input)
     x = concatenate([x, repeated_question])
     x, _ = output_gru(x, initial_state=memory_vector)
-    outputs = TimeDistributed(word_predictor)(x)
+    outputs = word_predictor(x)
     
-
+    # Build training model.
     inputs = story_input, question_input, decoder_input
     train_model = Model(inputs=inputs, outputs=outputs)
     train_model.compile(loss='sparse_categorical_crossentropy',
                   optimizer='rmsprop',
                   metrics=['accuracy'])
-    
+                      
     # Build encoder model.
     inputs = story_input, question_input
     outputs =  [memory_vector, question_vector]
@@ -278,7 +240,7 @@ def build_dmn_model(story_length, question_length, answer_length,
                             for i in range(recurrent_layers)]    
     
     x = embedding_lookup(decoder_prev_predict_input)
-    repeated_question = RepeatVector(1)(decoder_question_input)
+    repeated_question = add_time_dim(decoder_question_input)
     x = concatenate([x, repeated_question])
     
     x, decoder_state = output_gru(x, initial_state=decoder_state_inputs[0])

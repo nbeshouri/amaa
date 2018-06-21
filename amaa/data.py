@@ -55,12 +55,26 @@ def load_task(task_num, version, folder_path):
     output = []
     
     for story_lines, question_line in _read_babi_lines(task_path):
+        # The hint line numbers include the question lines, which I'm 
+        # removing. So I here I match the hint to the line number and 
+        # remap to a 0 indexed value.
+        story_line_indices = [re.match('^\d+', line).group(0) for line in story_lines]        
+        
+        # hint = re.search(r'\d+$', question_line)
+        # hint = hint.group(0)
+        # hint = story_line_indices.index(hint)
+        
+        hints = re.findall(f'\d+', question_line)
+        hints = hints[1:]  # First is line number.
+        hints = [story_line_indices.index(hint) for hint in hints]
+        
         story = ''.join(story_lines)
         story = story.replace('\n', ' ')
         story = re.sub(r'\d+\s', r'', story)
+        
         question, answer, _ = question_line.split('\t')
         question = re.sub(r'\d+\s', r'', question)
-        output.append((story, question, answer))
+        output.append((story, question, answer, hints))
     
     return output
 
@@ -111,7 +125,9 @@ def get_embeddings(texts, min_vocab_size=0):
                 continue
             vector = np.asarray(values[1:], dtype='float32')
             word_to_vec[word] = vector
-
+    
+    # TODO: Variables redundant and unclear. Total vocab should mean
+    # total vocab.
     total_vocab = data_vocab | set(word_to_vec.keys())
     rand_state = np.random.RandomState(42)
     word_to_id = {'<PAD>': 0, '<EOS>': 1, '<START>': 2}
@@ -148,15 +164,15 @@ def answer_id_lists_to_texts(id_lists, id_to_word):
 
 
 def get_train_val_test(train_sqas, test_sqas, task_subset=None):
-    
-    
+
     if task_subset == None:
         task_subset = range(1, 21)
     
     flat_train_sqas = chain(*train_sqas)
     flat_val_sqas = []
     flat_test_sqas = []
-    test_sqas = np.array(test_sqas)
+    test_sqas = np.array(test_sqas, dtype=object)  # Don't coerce types.
+    
     for task_sqas, task_num in zip(test_sqas, task_subset):        
         _, val_indices, test_indices = get_train_val_test_indices(
             len(task_sqas), val_ratio=0.50, test_ratio=0.50, seed=42 + task_num)        
@@ -164,25 +180,36 @@ def get_train_val_test(train_sqas, test_sqas, task_subset=None):
         flat_test_sqas.extend(task_sqas[test_indices])
     
     def process_sqas(sqas):
-        token_sqas = map(transforms.tokenize_texts, zip(*sqas))
-        token_sqas = tuple(map(np.array, token_sqas))
+        stories, questions, awnswers, hints = zip(*sqas)
+        stories, questions, awnswers = map(transforms.tokenize_texts, [stories, questions, awnswers])
+        token_sqas = tuple(map(np.array, [stories, questions, awnswers, hints]))
         return token_sqas
     
-    train_stories, train_questions, train_answers = process_sqas(flat_train_sqas)
-    val_stories, val_questions, val_answers = process_sqas(flat_val_sqas)
-    test_stories, test_questions, test_answers = process_sqas(flat_test_sqas)
+    train_stories, train_questions, train_answers, train_hints = process_sqas(flat_train_sqas)
+    val_stories, val_questions, val_answers, val_hints = process_sqas(flat_val_sqas)
+    test_stories, test_questions, test_answers, test_hints = process_sqas(flat_test_sqas)
+    
+    # Hack
+    # print(train_hints)
+    # 
+    # train_hints = train_hints[:, np.newaxis]
+    # val_hints = val_hints[:, np.newaxis]
+    # test_hints = test_hints[:, np.newaxis]
     
     data = Munch(
         X_train_stories=train_stories,
         X_train_questions=train_questions,
+        X_train_hints=train_hints,
         y_train=train_answers,
         
         X_val_stories=val_stories,
         X_val_questions=val_questions,
+        X_val_hints=val_hints,
         y_val=val_answers,
         
         X_test_stories=test_stories,
         X_test_questions=test_questions,
+        X_test_hints=test_hints,
         y_test=test_answers
     )
     
@@ -281,6 +308,37 @@ def get_train_val_test_indices(num_rows, val_ratio=0.25, test_ratio=0.25, seed=4
     return train_indices, val_indices, test_indices
     
 
+def get_sentence_masks(sentences, period_symbol):
+    mask = np.zeros(sentences.shape)
+    mask[sentences == period_symbol] = 1
+    return mask
+    
+
+def get_hint_masks(stories, hints, period_symbol):
+    masks = []
+    for story, story_hints in zip(stories, hints):
+        mask = []
+        sentence_num = 0
+        for word in story:
+            # WARNING: For reasons I don't understand, positively matching
+            # the meta-tokens helps it converge faster. It still does okay
+            # if you remove 0, but <EOS> bugs it. And I sort of think the 0
+            # does help. Maybe it's less attention than ignore...
+            if sentence_num in story_hints or word in (0, 1, 2):  # Meta-tokens.
+            # if story_hints[0] == sentence_num:
+                mask.append(1)
+            else:
+                mask.append(0)
+            if word == period_symbol:
+                sentence_num += 1
+        masks.append(mask)
+    masks = np.array(masks)
+    
+    assert masks.shape == stories.shape
+    
+    return masks
+    
+
 @memory.cache
 def get_babi_embeddings(use_10k=False, min_vocab_size=0):
     # Calculate embedding matrix with suitable vocab for all
@@ -290,11 +348,16 @@ def get_babi_embeddings(use_10k=False, min_vocab_size=0):
     babi_path = _babi_10K_path if use_10k else _babi_1K_path
     train_tasks = load_tasks('train', babi_path)
     test_tasks = load_tasks('test', babi_path)
-    tokenized_texts = map(transforms.to_tokens, chain(*chain(*chain(train_tasks, test_tasks))))
+    
+    # Don't tokenize the hints.
+    train_tasks = [t[:-1] for t in chain(*train_tasks)]
+    test_tasks = [t[:-1] for t in chain(*test_tasks)]
+    
+    tokenized_texts = map(transforms.to_tokens, chain(*chain(train_tasks, test_tasks)))
     return get_embeddings(tokenized_texts, min_vocab_size=min_vocab_size)
 
 
-@memory.cache
+# @memory.cache
 def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None, 
                   forced_question_length=None, forced_answer_length=None):
     
@@ -307,7 +370,7 @@ def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None,
     data.id_to_word = {id: word for word, id in data.word_to_id.items()}
     
     # Convert lists of texts to lists of lists of word ids.
-    keys = [key for key in data.keys() if 'X_' in key or 'y_' in key]
+    keys = [key for key in data.keys() if ('X_' in key or 'y_' in key) and 'hint' not in key]
     for key in keys:
         data[key] = texts_to_ids(data[key], data.word_to_id)
     
@@ -319,11 +382,22 @@ def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None,
         forced_length=forced_question_length)
     data.y_train, data.y_val, data.y_test = align_padding(
         data.y_train, data.y_val, data.y_test, forced_length=forced_answer_length)
-        
+    
     data.X_train_decoder = get_time_shifted(data.y_train)
     data.X_val_decoder = get_time_shifted(data.y_val)
     data.X_test_decoder = get_time_shifted(data.y_test)
     
+    # Add sentence masks.
+    end_of_sentence_symbol = data.word_to_id['.']
+    data.X_train_story_masks = get_sentence_masks(data.X_train_stories, end_of_sentence_symbol)
+    data.X_val_story_masks = get_sentence_masks(data.X_val_stories, end_of_sentence_symbol)
+    data.X_test_story_masks = get_sentence_masks(data.X_test_stories, end_of_sentence_symbol)
+    
+    # Expand attention hints.
+    data.X_train_hints = get_hint_masks(data.X_train_stories, data.X_train_hints, end_of_sentence_symbol)
+    data.X_val_hints = get_hint_masks(data.X_val_stories, data.X_val_hints, end_of_sentence_symbol)
+    data.X_test_hints = get_hint_masks(data.X_test_stories, data.X_test_hints, end_of_sentence_symbol)
+
     return data
     
 

@@ -7,8 +7,8 @@ import keras.backend as K
 
 
 
-def get_accuracy(encoder_model, decoder_model, X_stories, X_questions, y, id_to_word):    
-    y_pred = models.predict(encoder_model, decoder_model, X_stories, X_questions, y.shape[1])
+def get_accuracy(encoder_model, decoder_model, X_stories, X_questions, y, id_to_word, story_masks=None):    
+    y_pred = models.predict(encoder_model, decoder_model, X_stories, X_questions, y.shape[1], story_masks)
     y_pred = data.answer_id_lists_to_texts(y_pred, id_to_word)
     y_true = data.answer_id_lists_to_texts(y, id_to_word)
     return accuracy_score(y_true, y_pred)
@@ -22,7 +22,9 @@ def score_on_task(encoder_model, decoder_model, data_bunch):
                                     data_bunch[f'X_{dataset}_stories'],
                                     data_bunch[f'X_{dataset}_questions'],
                                     data_bunch[f'y_{dataset}'],
-                                    data_bunch.id_to_word)
+                                    data_bunch.id_to_word,
+                                    data_bunch[f'X_{dataset}_hints'])
+                                    # data_bunch[f'X_{dataset}_story_masks'])
     
     return pd.Series(row)
 
@@ -81,7 +83,8 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
         
         if weights_prefix is not None:
             utils.load_weights(train_model, weights_prefix)
-        else:
+        
+        if epochs is not None:
             print('multi run, training all tasks')
             models.train_model(train_model, training_babi_data, epochs)
         

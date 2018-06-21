@@ -145,7 +145,6 @@ def build_dmn_model(story_length, question_length, answer_length,
     
     story_input = Input(shape=(story_length,), name='story_input')
     question_input = Input(shape=(question_length,), name='question_input')
-    story_mask_input = Input(shape=(story_length,), name='story_mask_input')
     decoder_input = Input(shape=(answer_length,), name='decoder_input')
     
     embedding_lookup = Embedding(embedding_matrix.shape[0],
@@ -231,16 +230,14 @@ def build_dmn_model(story_length, question_length, answer_length,
     answer_prediction = word_predictor(x)
     
     # Build training model.
-    inputs = story_input, question_input, decoder_input, story_mask_input
-    # inputs = story_input, question_input, decoder_input
+    inputs = story_input, question_input, decoder_input
     outputs = answer_prediction, hint_output
     train_model = Model(inputs=inputs, outputs=outputs)
     train_model.compile(loss=['sparse_categorical_crossentropy', 'mse'],
                               optimizer='rmsprop', metrics=['accuracy'])
                       
     # Build encoder model.
-    inputs = story_input, question_input, story_mask_input
-    # inputs = story_input, question_input
+    inputs = story_input, question_input
     outputs =  [memory_vector, question_vector]
     encoder_model = Model(inputs=inputs, outputs=outputs)
     
@@ -271,18 +268,24 @@ def build_dmn_model(story_length, question_length, answer_length,
 
 def predict(encoder_model, decoder_model, stories, questions, max_answer_length, story_masks=None):
     """Returns the predictions as indicies."""
-    encoder_inputs = [stories, questions]
-    if len(encoder_model.inputs) > 2:
-        if story_masks is None:
-            raise ValeError("Supplied model requires story masks.")
-        encoder_inputs.append(story_masks)
+    
+    encoder_inputs = {'story_input': stories, 'question_input': questions}
+    
     *encoded_stories, encoded_questions = encoder_model.predict(encoder_inputs)
     batch_size = encoded_stories[0].shape[0]
     preds = np.zeros((batch_size, 1)) + 2  # 2 == <START>
     decoder_states = encoded_stories
     pred_list = []
     for i in range(max_answer_length):
-        preds, *decoder_states = decoder_model.predict([preds, encoded_questions] + decoder_states)
+        
+        decoder_inputs = {
+            'decoder_prev_predict_input': preds, 
+            'decoder_question_input': encoded_questions
+        }
+        for i, decoder_input in enumeerate(decoder_inputs):
+            decoder_inputs[f'decoder_state_input_{i}'] = decoder_input
+        
+        preds, *decoder_states = decoder_model.predict(decoder_inputs)
         preds = np.argmax(preds, axis=-1)
         pred_list.append(preds)
     return np.concatenate(pred_list, axis=-1)
@@ -293,14 +296,21 @@ def train_model(model, data, epochs):
     checkpoint_path = os.path.join(data_dir_path, f'temp_weights_{socket.gethostname()}.hdf5')    
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
-    checkpointer = ModelCheckpoint(filepath=checkpoint_path, save_best_only=True, save_weights_only=True, monitor='val_loss')
     
-    X_train = [data.X_train_stories, data.X_train_questions, data.X_train_decoder]
-    X_val = [data.X_val_stories, data.X_val_questions, data.X_val_decoder]
+    checkpointer = ModelCheckpoint(filepath=checkpoint_path, save_best_only=True, 
+                                   save_weights_only=True, monitor='val_loss')
     
-    if len(model.inputs) > 2:
-        X_train.append(data.X_train_story_masks) 
-        X_val.append(data.X_val_story_masks)
+    X_train = {
+        'story_input': data.X_train_stories, 
+        'question_input': data.X_train_questions, 
+        'decoder_input': data.X_train_decoder
+    }
+    
+    X_val = {
+        'story_input': data.X_val_stories, 
+        'question_input': data.X_val_questions, 
+        'decoder_input': data.X_val_decoder
+    }
         
     y_train = [data.y_train[:, :, np.newaxis]]
     y_val = [data.y_val[:, :, np.newaxis]]

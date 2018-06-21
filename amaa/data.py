@@ -20,12 +20,13 @@ from . import transforms
 from . import utils
 import joblib
 import numpy as np
+import socket
 
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
 _babi_1K_path = os.path.join(data_dir_path, 'tasks_1-20_v1-2', 'en')
 _babi_10K_path = os.path.join(data_dir_path, 'tasks_1-20_v1-2', 'en-10k')
-joblib_cache_dir_path = os.path.join(data_dir_path, 'joblib_cache')
+joblib_cache_dir_path = os.path.join(data_dir_path, f'joblib_cache_{socket.gethostname()}')
 memory = joblib.Memory(cachedir=joblib_cache_dir_path)
 
 
@@ -333,10 +334,35 @@ def get_hint_masks(stories, hints, period_symbol):
                 sentence_num += 1
         masks.append(mask)
     masks = np.array(masks)
-    
+
     assert masks.shape == stories.shape
-    
+
     return masks
+    
+# NOTE: Feels like it should work, but does not.
+# def get_hint_masks(stories, hints, period_symbol):
+#     masks = []
+#     for story, story_hints in zip(stories, hints):
+#         mask = []
+#         sentence_num = 0
+#         for word in story:
+#             # WARNING: For reasons I don't understand, positively matching
+#             # the meta-tokens helps it converge faster. It still does okay
+#             # if you remove 0, but <EOS> bugs it. And I sort of think the 0
+#             # does help. Maybe it's less attention than ignore...
+#             if (sentence_num in story_hints and word == period_symbol) or word == 1:  # Meta-tokens.
+#             # if story_hints[0] == sentence_num:
+#                 mask.append(1)
+#             else:
+#                 mask.append(0)
+#             if word == period_symbol:
+#                 sentence_num += 1
+#         masks.append(mask)
+#     masks = np.array(masks)
+# 
+#     assert masks.shape == stories.shape
+# 
+#     return masks
     
 
 @memory.cache

@@ -17,15 +17,22 @@ def get_accuracy(encoder_model, decoder_model, X_stories, X_questions, y, id_to_
 def score_on_task(encoder_model, decoder_model, data_bunch):
     row = {}
     for dataset in 'train', 'val', 'test':
-        row[dataset] = get_accuracy(encoder_model, 
-                                    decoder_model, 
-                                    data_bunch[f'X_{dataset}_stories'],
-                                    data_bunch[f'X_{dataset}_questions'],
-                                    data_bunch[f'y_{dataset}'],
-                                    data_bunch.id_to_word,
-                                    data_bunch[f'X_{dataset}_hints'])
-                                    # data_bunch[f'X_{dataset}_story_masks'])
-    
+        if models.model_is_sent_level(encoder_model):
+            row[dataset] = get_accuracy(encoder_model, 
+                                        decoder_model, 
+                                        data_bunch[f'X_{dataset}_story_sents'],
+                                        data_bunch[f'X_{dataset}_questions'],
+                                        data_bunch[f'y_{dataset}'],
+                                        data_bunch.id_to_word,
+                                        data_bunch[f'X_{dataset}_hints'])
+        else:
+            row[dataset] = get_accuracy(encoder_model, 
+                                        decoder_model, 
+                                        data_bunch[f'X_{dataset}_stories'],
+                                        data_bunch[f'X_{dataset}_questions'],
+                                        data_bunch[f'y_{dataset}'],
+                                        data_bunch.id_to_word,
+                                        data_bunch[f'X_{dataset}_hints'])
     return pd.Series(row)
 
 
@@ -48,9 +55,23 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
     
         for task_num in task_subset:
             babi_data = data.get_babi_data(task_subset=[task_num], use_10k=use_10k)
-            train_model, encoder_model, decoder_model = model_builder_func(
-                babi_data.X_train_stories.shape[1], babi_data.X_train_questions.shape[1], 
-                babi_data.y_train.shape[1], babi_data.embedding_matrix, **model_kwargs)
+            if 'dmn2' in model_builder_func.__name__:
+                train_model, encoder_model, decoder_model = model_builder_func(
+                    babi_data.X_train_story_sents.shape[1], 
+                    babi_data.X_train_story_sents.shape[2],
+                    babi_data.X_train_questions.shape[1], 
+                    babi_data.y_train.shape[1], 
+                    babi_data.embedding_matrix, 
+                    **model_kwargs
+                )
+            else:
+                train_model, encoder_model, decoder_model = model_builder_func(
+                    babi_data.X_train_stories.shape[1], 
+                    babi_data.X_train_questions.shape[1], 
+                    babi_data.y_train.shape[1], 
+                    babi_data.embedding_matrix, 
+                    **model_kwargs
+                )
             if weights_prefix is not None:
                 utils.load_weights(train_model, weights_prefix)
             else:
@@ -77,9 +98,19 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
         
         training_babi_data = data.get_babi_data(use_10k=use_10k)
         
-        train_model, encoder_model, decoder_model = model_builder_func(
-            training_babi_data.X_train_stories.shape[1], training_babi_data.X_train_questions.shape[1], 
-            training_babi_data.y_train.shape[1], training_babi_data.embedding_matrix, **model_kwargs)
+        if 'dmn2' in model_builder_func.__name__:
+            train_model, encoder_model, decoder_model = model_builder_func(
+                training_babi_data.X_train_story_sents.shape[1], 
+                training_babi_data.X_train_story_sents.shape[2],
+                training_babi_data.X_train_questions.shape[1], 
+                training_babi_data.y_train.shape[1], 
+                training_babi_data.embedding_matrix, 
+                **model_kwargs
+            )
+        else:
+            train_model, encoder_model, decoder_model = model_builder_func(
+                training_babi_data.X_train_stories.shape[1], training_babi_data.X_train_questions.shape[1], 
+                training_babi_data.y_train.shape[1], training_babi_data.embedding_matrix, **model_kwargs)
         
         if weights_prefix is not None:
             utils.load_weights(train_model, weights_prefix)

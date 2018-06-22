@@ -21,6 +21,7 @@ from . import utils
 import joblib
 import numpy as np
 import socket
+# from colections import Or
 
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -137,6 +138,7 @@ def get_embeddings(texts, min_vocab_size=0):
     embedding_matrix[0] = 0
     embedding_matrix[1] = 1
     embedding_matrix[2] = 2
+    total_vocab = sorted(total_vocab)  # Sort for consistent ids.
     for i, word in enumerate(total_vocab):
         word_id = i + num_meta_tokens
         if word in word_to_vec:
@@ -200,17 +202,17 @@ def get_train_val_test(train_sqas, test_sqas, task_subset=None):
     data = Munch(
         X_train_stories=train_stories,
         X_train_questions=train_questions,
-        X_train_hints=train_hints,
+        train_hints=train_hints,
         y_train=train_answers,
         
         X_val_stories=val_stories,
         X_val_questions=val_questions,
-        X_val_hints=val_hints,
+        val_hints=val_hints,
         y_val=val_answers,
         
         X_test_stories=test_stories,
         X_test_questions=test_questions,
-        X_test_hints=test_hints,
+        test_hints=test_hints,
         y_test=test_answers
     )
     
@@ -338,6 +340,30 @@ def get_hint_masks(stories, hints, period_symbol):
     assert masks.shape == stories.shape
 
     return masks
+
+def get_sent_attention_targets(stories, hints, period_symbol):
+    masks = []
+    for story, story_hints in zip(stories, hints):
+        mask = []
+        sentence_num = 0
+        for word in story:
+            # WARNING: For reasons I don't understand, positively matching
+            # the meta-tokens helps it converge faster. It still does okay
+            # if you remove 0, but <EOS> bugs it. And I sort of think the 0
+            # does help. Maybe it's less attention than ignore...
+            if sentence_num in story_hints or word in (0, 1, 2):  # Meta-tokens.
+            # if story_hints[0] == sentence_num:
+                mask.append(1)
+            else:
+                mask.append(0)
+            if word == period_symbol:
+                sentence_num += 1
+        masks.append(mask)
+    masks = np.array(masks)
+
+    assert masks.shape == stories.shape
+
+    return masks
     
 # NOTE: Feels like it should work, but does not.
 # def get_hint_masks(stories, hints, period_symbol):
@@ -383,6 +409,47 @@ def get_babi_embeddings(use_10k=False, min_vocab_size=0):
     return get_embeddings(tokenized_texts, min_vocab_size=min_vocab_size)
 
 
+def get_story_sents(stories, period_symbol):
+    output = []
+    for story in stories:
+        sents = []
+        cur_sent = []
+        for word in story:
+            cur_sent.append(word)
+            if word == period_symbol:
+                cur_sent.append(1)  # <EOS>
+                sents.append(cur_sent)
+                cur_sent = []
+        output.append(sents)
+    return output
+
+def align_story_sents(*story_sets, num_sents=None, sent_length=None):
+    
+    all_stories = list(chain(*story_sets))
+    all_sents = list(chain(*all_stories))
+    num_sents = max(len(story) for story in all_stories)
+    sent_length = max(len(sent) for sent in all_sents)
+    
+    output = []
+    
+    for story_set in story_sets:
+        story_set_array = np.zeros((len(story_set), num_sents, sent_length))
+        for story_num, story in enumerate(story_set):
+            for sent_num, sent in enumerate(story):
+                story_set_array[story_num, sent_num, 0:len(sent)] = sent
+        output.append(story_set_array)
+        
+    return output
+
+
+def get_sent_hints(stories, hints, period_symbol):
+    masks = np.zeros(stories.shape[:-1])
+    for story_num, (story, story_hints) in enumerate(zip(stories, hints)):
+        for hint in story_hints:
+            masks[story_num, hint] = 1
+    return masks
+
+
 # @memory.cache
 def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None, 
                   forced_question_length=None, forced_answer_length=None):
@@ -420,10 +487,25 @@ def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None,
     data.X_test_story_masks = get_sentence_masks(data.X_test_stories, end_of_sentence_symbol)
     
     # Expand attention hints.
-    data.X_train_hints = get_hint_masks(data.X_train_stories, data.X_train_hints, end_of_sentence_symbol)
-    data.X_val_hints = get_hint_masks(data.X_val_stories, data.X_val_hints, end_of_sentence_symbol)
-    data.X_test_hints = get_hint_masks(data.X_test_stories, data.X_test_hints, end_of_sentence_symbol)
-
+    data.X_train_hints = get_hint_masks(data.X_train_stories, data.train_hints, end_of_sentence_symbol)
+    data.X_val_hints = get_hint_masks(data.X_val_stories, data.val_hints, end_of_sentence_symbol)
+    data.X_test_hints = get_hint_masks(data.X_test_stories, data.test_hints, end_of_sentence_symbol)
+    
+    # Add sentence versions of stories.
+    data.X_train_story_sents = get_story_sents(data.X_train_stories, end_of_sentence_symbol)
+    data.X_val_story_sents = get_story_sents(data.X_val_stories, end_of_sentence_symbol)
+    data.X_test_story_sents = get_story_sents(data.X_test_stories, end_of_sentence_symbol)
+    
+    # Pad them.
+    data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents = align_story_sents(
+        data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents)
+    
+        
+    data.y_train_att = get_sent_hints(data.X_train_story_sents, data.train_hints, end_of_sentence_symbol)
+    data.y_val_att = get_sent_hints(data.X_val_story_sents, data.val_hints, end_of_sentence_symbol)
+    data.y_test_att = get_sent_hints(data.X_test_story_sents, data.test_hints, end_of_sentence_symbol)
+    
+    
     return data
     
 

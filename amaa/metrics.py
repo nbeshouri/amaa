@@ -50,6 +50,18 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
     if model_kwargs is None:
         model_kwargs = {}
     
+    if results_file_name is not None:
+        results_path = os.path.join(utils.data_dir_path, results_file_name)
+        utils.archive_data(results_file_name)
+    
+    def write_out_results(rows):
+        results = pd.DataFrame(rows)
+        results['epochs'] = epochs
+        results['model_builder_func'] = model_builder_func.__name__
+        results['model_kwargs'] = str(model_kwargs)
+        results.to_csv(results_path)
+        return results
+        
     rows = []
     if mode in ('single', 'both'):
     
@@ -84,6 +96,7 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
             row.loc['10k'] = use_10k
             print(row)
             rows.append(row)
+            write_out_results(rows)
             # K.clear_session()
             
         # TODO: Using clear session has side effects. You can get keras
@@ -136,18 +149,10 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
             row.loc['10k'] = use_10k
             print(row)
             rows.append(row)        
-    
-    # K.clear_session()
 
-    results = pd.DataFrame(rows)
-    results['epochs'] = epochs
-    results['model_builder_func'] = model_builder_func.__name__
-    results['model_kwargs'] = str(model_kwargs)
-    if results_file_name is not None:
-        path = os.path.join(utils.data_dir_path, results_file_name)
-        utils.archive_data(results_file_name)
-        results.to_csv(path)
-    return results
+    write_out_results(rows)
+    
+    # return results
 
 
 def clip_data_set(data_bunch, limit):

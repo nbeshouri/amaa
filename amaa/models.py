@@ -407,7 +407,7 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     losses = ['sparse_categorical_crossentropy']
     if gate_supervision:
         outputs.append(hint_output)
-        losses.append('mse')
+        losses.append('binary_crossentropy')
     train_model = Model(inputs=inputs, outputs=outputs)
     train_model.compile(loss=losses, optimizer='rmsprop', metrics=['accuracy'])
                       
@@ -443,6 +443,7 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
 #
 # SHARED UTILS
 #
+
 
 def model_is_sent_level(model):
     for input in model.inputs:

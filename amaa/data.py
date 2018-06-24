@@ -424,11 +424,13 @@ def get_story_sents(stories, period_symbol):
     return output
 
 def align_story_sents(*story_sets, num_sents=None, sent_length=None):
-    
-    all_stories = list(chain(*story_sets))
-    all_sents = list(chain(*all_stories))
-    num_sents = max(len(story) for story in all_stories)
-    sent_length = max(len(sent) for sent in all_sents)
+    # print('story sets', story_sets)
+    if num_sents is None:
+        all_stories = list(chain(*story_sets))
+        all_sents = list(chain(*all_stories))
+    if sent_length is None:
+        num_sents = max(len(story) for story in all_stories)
+        sent_length = max(len(sent) for sent in all_sents)
     
     output = []
     
@@ -436,7 +438,9 @@ def align_story_sents(*story_sets, num_sents=None, sent_length=None):
         story_set_array = np.zeros((len(story_set), num_sents, sent_length))
         for story_num, story in enumerate(story_set):
             for sent_num, sent in enumerate(story):
-                story_set_array[story_num, sent_num, 0:len(sent)] = sent
+                sent_pad = num_sents - len(story)
+                word_pad = sent_length - len(sent) 
+                story_set_array[story_num, sent_num + sent_pad, word_pad:len(sent) + word_pad] = sent
         output.append(story_set_array)
         
     return output
@@ -445,14 +449,19 @@ def align_story_sents(*story_sets, num_sents=None, sent_length=None):
 def get_sent_hints(stories, hints, period_symbol):
     masks = np.zeros(stories.shape[:-1])
     for story_num, (story, story_hints) in enumerate(zip(stories, hints)):
+        sent_pad = 0
+        for sent in story:
+            if np.any(sent):
+                break
+            sent_pad += 1
         for hint in story_hints:
-            masks[story_num, hint] = 1
+            masks[story_num, hint + sent_pad] = 1
     return masks
 
 
-@memory.cache
+# @memory.cache
 def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None, 
-                  forced_question_length=None, forced_answer_length=None):
+                  forced_question_length=None, forced_answer_length=None, forced_num_sents=None, forced_sent_length=None):
     
     babi_path = _babi_10K_path if use_10k else _babi_1K_path
     train_tasks = load_tasks('train', babi_path, task_subset)
@@ -498,7 +507,7 @@ def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None,
     
     # Pad them.
     data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents = align_story_sents(
-        data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents)
+        data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents, num_sents=forced_num_sents, sent_length=forced_sent_length)
     
         
     data.y_train_att = get_sent_hints(data.X_train_story_sents, data.train_hints, end_of_sentence_symbol)

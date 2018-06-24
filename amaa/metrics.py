@@ -61,13 +61,17 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
         results['model_kwargs'] = str(model_kwargs)
         results.to_csv(results_path)
         return results
-        
+    
+    print(model_builder_func)
+    print(model_kwargs)
+    print(results_file_name)
+    
     rows = []
     if mode in ('single', 'both'):
     
         for task_num in task_subset:
             babi_data = data.get_babi_data(task_subset=[task_num], use_10k=use_10k)
-            if 'dmn2' in model_builder_func.__name__:
+            if 'dmn2' in model_builder_func.__name__ or 'dmn3' in model_builder_func.__name__:
                 train_model, encoder_model, decoder_model = model_builder_func(
                     babi_data.X_train_story_sents.shape[1], 
                     babi_data.X_train_story_sents.shape[2],
@@ -111,7 +115,7 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
         
         training_babi_data = data.get_babi_data(use_10k=use_10k)
         
-        if 'dmn2' in model_builder_func.__name__:
+        if 'dmn2' in model_builder_func.__name__ or 'dmn3' in model_builder_func.__name__:
             train_model, encoder_model, decoder_model = model_builder_func(
                 training_babi_data.X_train_story_sents.shape[1], 
                 training_babi_data.X_train_story_sents.shape[2],
@@ -137,11 +141,15 @@ def score_on_babi_tasks(model_builder_func, weights_prefix=None, epochs=100,
         
         for task_num in range(1, 21):
             print('multi run, testing task', task_num)
+            
+            
             testing_babi_data = data.get_babi_data(
                 task_subset=[task_num], use_10k=use_10k, 
                 forced_story_length=training_babi_data.X_train_stories.shape[1], 
                 forced_question_length=training_babi_data.X_train_questions.shape[1],
-                forced_answer_length=training_babi_data.y_train.shape[1])
+                forced_answer_length=training_babi_data.y_train.shape[1],
+                forced_num_sents=training_babi_data.X_train_story_sents.shape[1],
+                forced_sent_length=training_babi_data.X_train_story_sents.shape[2])
     
             row = score_on_task(encoder_model, decoder_model, testing_babi_data)
             row.loc['task_number'] = task_num

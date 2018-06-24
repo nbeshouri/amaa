@@ -450,7 +450,7 @@ def get_sent_hints(stories, hints, period_symbol):
     return masks
 
 
-# @memory.cache
+@memory.cache
 def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None, 
                   forced_question_length=None, forced_answer_length=None):
     

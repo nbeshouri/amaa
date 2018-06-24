@@ -21,6 +21,8 @@ import os
 import numpy as np
 import socket
 import keras.layers as layers
+from . import data
+import pandas as pd
 
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -267,7 +269,8 @@ def build_dmn_model(story_length, question_length, answer_length,
 
 def build_dmn2_model(num_story_sentences, story_sentence_length, question_length, 
                      answer_length, embedding_matrix, recur_size=256, recurrent_layers=1,
-                     iterations=3, gate_dense_size=128, use_mem_gru=False, gate_supervision=True):
+                     iterations=3, gate_dense_size=128, use_mem_gru=False, gate_supervision=True,
+                     return_att_model=False):
     
     story_sent_inputs = [Input(shape=(story_sentence_length,), name=f'story_sentence_{i}_input')
                          for i in range(num_story_sentences)]
@@ -343,6 +346,7 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     delta1 = layers.subtract([merged_sents, question_vectors])
     delta1 = layers.multiply([delta1, delta1])
     
+    attention_outputs = []
     for iteration in range(iterations):
         # Calculate the weights for the gate vectors.
         memory_vectors = repeat_num_sents_times(per_layer_memory_vectors[-1])
@@ -358,40 +362,30 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
         x = gate_dense1(gate_feature_vectors)
         x = gate_dense2(x)
         x = flatten(x)
-    
-        if iteration == iterations - 1:
-            hint_output = x
-        
+        attention_outputs.append(x)
         x = repeat_recur_size_times(x)
         gate_weights = permute(x)
         
         # Calculate the episode vector for this iteration.
         weighted_fact_vectors = layers.multiply([merged_sents, gate_weights])
         
-        episodes = []
+        per_layer_episodes = []
         x = weighted_fact_vectors
         for ep_encoder in ep_encoders:
             x, episode = ep_encoder(x, initial_state=initial_state)
-            episodes.append(episode)
-            
-        # episodes = []
-        # x = weighted_fact_vectors
-        # for ep_encoder, prev_episode in zip(ep_encoders, per_layer_memory_vectors):
-        #     x, episode = ep_encoder(x, initial_state=prev_episode)
-        #     episodes.append(episode)
-        
+            per_layer_episodes.append(episode)
         
         if use_mem_gru:
             new_per_layer_memory_vectors = []
-            for memory_vector, episode in zip(per_layer_memory_vectors, episodes):
+            for memory_vector, episode in zip(per_layer_memory_vectors, per_layer_episodes):
                 x = concatenate([memory_vector, episode])
                 x = mem_dense1(x)
                 memory_vector = mem_dense2(x)
                 new_per_layer_memory_vectors.append(memory_vector)
             per_layer_memory_vectors = new_per_layer_memory_vectors
         else:
-            per_layer_memory_vectors = episodes
-
+            per_layer_memory_vectors = per_layer_episodes
+    
     # Decode answer.    
     repeated_question = RepeatVector(answer_length)(question_vector)
     x = embedding_lookup(decoder_input)
@@ -406,7 +400,7 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     outputs = [answer_prediction]
     losses = ['sparse_categorical_crossentropy']
     if gate_supervision:
-        outputs.append(hint_output)
+        outputs.append(attention_outputs[-1])
         losses.append('binary_crossentropy')
     train_model = Model(inputs=inputs, outputs=outputs)
     train_model.compile(loss=losses, optimizer='rmsprop', metrics=['accuracy'])
@@ -414,7 +408,6 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     # Build encoder model.
     inputs = story_sent_inputs + [question_input]
     outputs =  per_layer_memory_vectors + [question_vector]
-    # print('outputs', outputs)
     encoder_model = Model(inputs=inputs, outputs=outputs)
     
     # Build decoder model.
@@ -437,7 +430,15 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     outputs = [x] + decoder_states
     decoder_model = Model(inputs=inputs, outputs=outputs)
     
-    return train_model, encoder_model, decoder_model
+    models = [train_model, encoder_model, decoder_model]
+    
+    # Build attention mdoel.
+    if return_att_model:
+        inputs = story_sent_inputs + [question_input]
+        att_model = Model(inputs=inputs, outputs=attention_outputs)
+        models.append(att_model)
+    
+    return models
     
 
 #
@@ -451,12 +452,8 @@ def model_is_sent_level(model):
             return True
     return False
 
-def model_use_att_hints(model):
-    pass
 
-def predict(encoder_model, decoder_model, stories, questions, max_answer_length, story_masks=None):
-    """Returns the predictions as indicies."""
-    
+def build_encoder_inputs(encoder_model, stories, questions):
     encoder_inputs = {}
     
     if model_is_sent_level(encoder_model):
@@ -465,10 +462,15 @@ def predict(encoder_model, decoder_model, stories, questions, max_answer_length,
     else:
         encoder_inputs['story_input'] = stories
     
-    # print(encoder_inputs)
     encoder_inputs['question_input'] = questions
     
-    # print(encoder_inputs)
+    return encoder_inputs
+    
+
+def predict(encoder_model, decoder_model, stories, questions, max_answer_length, story_masks=None):
+    """Returns the predictions as indicies."""
+    
+    encoder_inputs = build_encoder_inputs(encoder_model, stories, questions)
     
     *encoded_stories, encoded_questions = encoder_model.predict(encoder_inputs)
     batch_size = encoded_stories[0].shape[0]
@@ -488,10 +490,66 @@ def predict(encoder_model, decoder_model, stories, questions, max_answer_length,
         preds, *decoder_states = decoder_model.predict(decoder_inputs)
         preds = np.argmax(preds, axis=-1)
         pred_list.append(preds)
+    
     return np.concatenate(pred_list, axis=-1)
-        
+    
+    
+def get_attention_info(encoder_model, decoder_model, attention_model, story, question, answer, y_att, id_to_word):
 
-def train_model(model, data, epochs):
+    stories = story[np.newaxis, :]
+    questions = question[np.newaxis, :]
+    story_sent_strings = data.id_lists_to_texts(story, id_to_word)
+    question_str = data.ids_to_text(question, id_to_word)
+    answer_str = data.ids_to_text(answer, id_to_word)
+
+    predicted_answer = predict(encoder_model, decoder_model, stories, questions, len(answer))
+    predicted_answer_str = data.ids_to_text(predicted_answer[0], id_to_word)
+    
+    att_inputs = build_encoder_inputs(encoder_model, stories, questions)
+    att_preds = attention_model.predict(att_inputs)
+    att_preds = np.row_stack(att_preds)
+    att_preds = np.swapaxes(att_preds, 0, 1)
+    
+    rows = []
+    for story_sent, att_weights, y_att_for_sent in zip(story_sent_strings, att_preds, y_att):
+        row = {'text': story_sent, 'y_att': y_att_for_sent}
+        for iter, weight in enumerate(att_weights):
+            row[f'iter_{iter + 1}_att'] = weight
+        rows.append(row)
+    
+    columns = ['text'] + [k for k in rows[0] if 'iter' in k] + ['y_att']
+    
+    df = pd.DataFrame(rows, columns=columns)
+    
+    qa = pd.DataFrame(
+        [question_str, answer_str, predicted_answer_str], index=['question', 'answer', 'pred_answer'], 
+        columns=[''])
+    
+    return df, qa
+    
+
+def debug_attention(encoder_model, decoder_model, attention_model, data_bunch, data_set, question_index):
+    
+    story = data_bunch[f'X_{data_set}_story_sents'][question_index]
+    question = data_bunch[f'X_{data_set}_questions'][question_index]
+    answer = data_bunch[f'y_{data_set}'][question_index]
+    y_att = data_bunch[f'y_{data_set}_att'][question_index]
+    question_str = data.ids_to_text(question, data_bunch.id_to_word)
+    answer_str = data.ids_to_text(answer, data_bunch.id_to_word)
+    
+    att_info, qa_info = get_attention_info(
+        encoder_model, decoder_model, attention_model, story, question,
+        answer, y_att, data_bunch.id_to_word)
+    
+    pd.set_option('expand_frame_repr', False)
+    pd.set_option('display.max_colwidth', 120)
+    pd.set_option("display.max_columns", 101)
+    
+    print(att_info)
+    print(qa_info)
+
+
+def train_model(model, train_data, epochs):
     # Train 
     checkpoint_path = os.path.join(data_dir_path, f'temp_weights_{socket.gethostname()}.hdf5')    
     if os.path.exists(checkpoint_path):
@@ -501,33 +559,33 @@ def train_model(model, data, epochs):
                                    save_weights_only=True, monitor='val_loss')
     
     X_train = {
-        'story_input': data.X_train_stories, 
-        'question_input': data.X_train_questions, 
-        'decoder_input': data.X_train_decoder
+        'story_input': train_data.X_train_stories, 
+        'question_input': train_data.X_train_questions, 
+        'decoder_input': train_data.X_train_decoder
     }
     
-    for i in range(data.X_train_story_sents.shape[1]):
-        X_train[f'story_sentence_{i}_input'] = data.X_train_story_sents[:, i]
+    for i in range(train_data.X_train_story_sents.shape[1]):
+        X_train[f'story_sentence_{i}_input'] = train_data.X_train_story_sents[:, i]
     
     X_val = {
-        'story_input': data.X_val_stories, 
-        'question_input': data.X_val_questions, 
-        'decoder_input': data.X_val_decoder
+        'story_input': train_data.X_val_stories, 
+        'question_input': train_data.X_val_questions, 
+        'decoder_input': train_data.X_val_decoder
     }
     
-    for i in range(data.X_val_story_sents.shape[1]):
-        X_val[f'story_sentence_{i}_input'] = data.X_val_story_sents[:, i]
+    for i in range(train_data.X_val_story_sents.shape[1]):
+        X_val[f'story_sentence_{i}_input'] = train_data.X_val_story_sents[:, i]
     
-    y_train = [data.y_train[:, :, np.newaxis]]
-    y_val = [data.y_val[:, :, np.newaxis]]
+    y_train = [train_data.y_train[:, :, np.newaxis]]
+    y_val = [train_data.y_val[:, :, np.newaxis]]
         
     if len(model.outputs) > 1:
         if model_is_sent_level(model):
-            y_train.append(data.y_train_att)
-            y_val.append(data.y_val_att)
+            y_train.append(train_data.y_train_att)
+            y_val.append(train_data.y_val_att)
         else:
-            y_train.append(data.X_train_hints)
-            y_val.append(data.X_val_hints)
+            y_train.append(train_data.X_train_hints)
+            y_val.append(train_data.X_val_hints)
     
     # Train the model.
     model.fit(X_train, y_train, batch_size=128, epochs=epochs,

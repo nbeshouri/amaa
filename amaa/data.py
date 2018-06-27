@@ -7,21 +7,15 @@ Todo:
 
 """
 
-
-
-# from . import utils
 import os
-from glob import glob
 import re
-import numpy as np
-from munch import Munch
-from itertools import chain
-from . import transforms
-from . import utils
-import joblib
-import numpy as np
+from glob import glob
 import socket
-# from colections import Or
+from itertools import chain
+from munch import Munch
+import numpy as np
+from . import transforms
+import joblib
 
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -31,11 +25,8 @@ joblib_cache_dir_path = os.path.join(data_dir_path, f'joblib_cache_{socket.getho
 memory = joblib.Memory(cachedir=joblib_cache_dir_path)
 
 
-
 def _read_babi_lines(path):
-    
     story_lines = []
-
     with open(path) as f:
         for line in f:
             line_num = int(line.split(' ')[0])
@@ -152,7 +143,7 @@ def ids_to_text(ids, id_to_word):
     tokens = [id_to_word[id] for id in ids]
     return ' '.join(tokens)
 
-    
+
 def id_lists_to_texts(id_lists, id_to_word):
     return [ids_to_text(ids, id_to_word) for ids in id_lists]
 
@@ -162,13 +153,14 @@ def answer_ids_to_text(ids, id_to_word):
     text = text.split('<EOS>')[0]
     return text.strip()
 
+
 def answer_id_lists_to_texts(id_lists, id_to_word):
     return [answer_ids_to_text(ids, id_to_word) for ids in id_lists]
 
 
 def get_train_val_test(train_sqas, test_sqas, task_subset=None):
 
-    if task_subset == None:
+    if task_subset is None:
         task_subset = range(1, 21)
     
     flat_train_sqas = chain(*train_sqas)
@@ -191,13 +183,6 @@ def get_train_val_test(train_sqas, test_sqas, task_subset=None):
     train_stories, train_questions, train_answers, train_hints = process_sqas(flat_train_sqas)
     val_stories, val_questions, val_answers, val_hints = process_sqas(flat_val_sqas)
     test_stories, test_questions, test_answers, test_hints = process_sqas(flat_test_sqas)
-    
-    # Hack
-    # print(train_hints)
-    # 
-    # train_hints = train_hints[:, np.newaxis]
-    # val_hints = val_hints[:, np.newaxis]
-    # test_hints = test_hints[:, np.newaxis]
     
     data = Munch(
         X_train_stories=train_stories,
@@ -271,29 +256,6 @@ def align_padding(*id_matrices, forced_length=None):
     return output
 
 
-def add_nn_X_y(data, word_to_id, X_padding):
-    # This should be smart enough to add the correct amount of
-    # padding on its own. 
-    keys = [key for key in data.keys if 'X_' in key]
-    for key in keys:
-        data[key] = to_ids(data[key])
-    return data
-    
-    
-    # data = Munch(
-    #     X_train_stories=train_stories,
-    #     X_train_questions=train_questions,
-    #     y_train=train_answers,
-    # 
-    #     X_val_stories=test_stories[val_indices],
-    #     X_val_questions=test_questions[val_indices],
-    #     y_val=test_answers[val_indices],
-    # 
-    #     X_test_stories=test_stories[test_indices],
-    #     X_test_questions=test_questions[test_indices],
-    #     y_test=test_answers[test_indices]
-    # )
-
 def get_time_shifted(sequences):
     # TODO: Start, pad, etc. should be constants.
     start_tokens = np.zeros((sequences.shape[0], 1)) + 2  # <START> == 2
@@ -328,7 +290,6 @@ def get_hint_masks(stories, hints, period_symbol):
             # if you remove 0, but <EOS> bugs it. And I sort of think the 0
             # does help. Maybe it's less attention than ignore...
             if sentence_num in story_hints or word in (0, 1, 2):  # Meta-tokens.
-            # if story_hints[0] == sentence_num:
                 mask.append(1)
             else:
                 mask.append(0)
@@ -341,55 +302,6 @@ def get_hint_masks(stories, hints, period_symbol):
 
     return masks
 
-def get_sent_attention_targets(stories, hints, period_symbol):
-    masks = []
-    for story, story_hints in zip(stories, hints):
-        mask = []
-        sentence_num = 0
-        for word in story:
-            # WARNING: For reasons I don't understand, positively matching
-            # the meta-tokens helps it converge faster. It still does okay
-            # if you remove 0, but <EOS> bugs it. And I sort of think the 0
-            # does help. Maybe it's less attention than ignore...
-            if sentence_num in story_hints or word in (0, 1, 2):  # Meta-tokens.
-            # if story_hints[0] == sentence_num:
-                mask.append(1)
-            else:
-                mask.append(0)
-            if word == period_symbol:
-                sentence_num += 1
-        masks.append(mask)
-    masks = np.array(masks)
-
-    assert masks.shape == stories.shape
-
-    return masks
-    
-# NOTE: Feels like it should work, but does not.
-# def get_hint_masks(stories, hints, period_symbol):
-#     masks = []
-#     for story, story_hints in zip(stories, hints):
-#         mask = []
-#         sentence_num = 0
-#         for word in story:
-#             # WARNING: For reasons I don't understand, positively matching
-#             # the meta-tokens helps it converge faster. It still does okay
-#             # if you remove 0, but <EOS> bugs it. And I sort of think the 0
-#             # does help. Maybe it's less attention than ignore...
-#             if (sentence_num in story_hints and word == period_symbol) or word == 1:  # Meta-tokens.
-#             # if story_hints[0] == sentence_num:
-#                 mask.append(1)
-#             else:
-#                 mask.append(0)
-#             if word == period_symbol:
-#                 sentence_num += 1
-#         masks.append(mask)
-#     masks = np.array(masks)
-# 
-#     assert masks.shape == stories.shape
-# 
-#     return masks
-    
 
 @memory.cache
 def get_babi_embeddings(use_10k=False, min_vocab_size=0):
@@ -423,13 +335,14 @@ def get_story_sents(stories, period_symbol):
         output.append(sents)
     return output
 
+
 def align_story_sents(*story_sets, num_sents=None, sent_length=None):
-    # print('story sets', story_sets)
-    if num_sents is None:
+    if num_sents is None or sent_length is None:
         all_stories = list(chain(*story_sets))
         all_sents = list(chain(*all_stories))
-    if sent_length is None:
+    if num_sents is None:
         num_sents = max(len(story) for story in all_stories)
+    if sent_length is None:
         sent_length = max(len(sent) for sent in all_sents)
     
     output = []
@@ -446,7 +359,7 @@ def align_story_sents(*story_sets, num_sents=None, sent_length=None):
     return output
 
 
-def get_sent_hints(stories, hints, period_symbol):
+def get_sent_hints(stories, hints):
     masks = np.zeros(stories.shape[:-1])
     for story_num, (story, story_hints) in enumerate(zip(stories, hints)):
         sent_pad = 0
@@ -461,7 +374,8 @@ def get_sent_hints(stories, hints, period_symbol):
 
 # @memory.cache
 def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None, 
-                  forced_question_length=None, forced_answer_length=None, forced_num_sents=None, forced_sent_length=None):
+                  forced_question_length=None, forced_answer_length=None,
+                  forced_num_sents=None, forced_sent_length=None):
     
     babi_path = _babi_10K_path if use_10k else _babi_1K_path
     train_tasks = load_tasks('train', babi_path, task_subset)
@@ -507,68 +421,12 @@ def get_babi_data(task_subset=None, use_10k=False, forced_story_length=None,
     
     # Pad them.
     data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents = align_story_sents(
-        data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents, num_sents=forced_num_sents, sent_length=forced_sent_length)
-    
+        data.X_train_story_sents, data.X_val_story_sents, data.X_test_story_sents,
+        num_sents=forced_num_sents, sent_length=forced_sent_length)
         
-    data.y_train_att = get_sent_hints(data.X_train_story_sents, data.train_hints, end_of_sentence_symbol)
-    data.y_val_att = get_sent_hints(data.X_val_story_sents, data.val_hints, end_of_sentence_symbol)
-    data.y_test_att = get_sent_hints(data.X_test_story_sents, data.test_hints, end_of_sentence_symbol)
+    data.y_train_att = get_sent_hints(data.X_train_story_sents, data.train_hints)
+    data.y_val_att = get_sent_hints(data.X_val_story_sents, data.val_hints)
+    data.y_test_att = get_sent_hints(data.X_test_story_sents, data.test_hints)
     
     
     return data
-    
-
-
-
-
-
-
-# data = get_babi_data(task_subset=[1, 20])
-
-
-# print(len(data.X_train_questions))
-# 
-# print(id_lists_to_texts(data.X_train_questions, data.id_to_word))
-
-# small_babi = get_babi_data()
-# utils.save_data(small_babi, 'babi_1K_data.pickle')
-# 
-# print('Done small.')
-# 
-# big_babi = get_babi_data(use_10k=True)
-# utils.save_data(big_babi, 'babi_10k_data.pickle')
-
-# TODO: Decorator that takes a cache name and will cache the output for a given 
-# set of args. It should also take an optional flag to recompute data. Or it could
-# hash the source code file to see if anything has changed. 
-    
-
-# get_babi_data()
-    
-# train_tasks = load_tasks('train', _babi_1K_path)[:100]
-# test_tasks = load_tasks('test', _babi_1K_path)[:100]
-# 
-# # train_tasks = load_task(8, 'train', _babi_1K_path)
-# # test_tasks = load_task(8, 'test', _babi_1K_path)
-# data = get_train_val_test(train_tasks, test_tasks)
-# 
-# print(data.X_val_stories[3])
-# print(data.X_val_questions[3])
-# print(data.y_val[3])
-# 
-# print(data.X_train_stories[54])
-# print(data.X_train_questions[54])
-# print(data.y_train[54])
-
-
-
-# print(len(train_tasks))
-# print(train_tasks[:100])
-# get_train_val_test(train_tasks, test_tasks)
-
-
-# print(len(output))
-
-    
-
-

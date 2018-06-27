@@ -1,3 +1,4 @@
+import os
 from keras.models import Model
 from keras.callbacks import ModelCheckpoint
 from keras.layers import (
@@ -6,30 +7,21 @@ from keras.layers import (
     Embedding,
     Bidirectional,
     GRU,
-    Dropout,
     concatenate,
     RepeatVector,
     Lambda, 
     TimeDistributed,
-    LSTM,
-    Reshape,
     Flatten,
     Permute
 )
 from keras import backend as K
-import os
 import numpy as np
 import socket
 import keras.layers as layers
-from . import data
 import pandas as pd
-
+from . import data
 
 data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
-
-
-import sys
-sys.setrecursionlimit(5000)
 
 
 #
@@ -53,27 +45,25 @@ def build_baseline_model(story_length, question_length, answer_length,
     encoders = [] 
     for i in range(recurrent_layers):
         return_seq = False if i == recurrent_layers - 1 else True
-        encoders.append(Bidirectional(GRU(recur_size // 2, return_sequences=return_seq, 
-                        name=f'encoder{i}')))
+        encoder = GRU(recur_size // 2, return_sequences=return_seq, name=f'encoder{i}')
+        encoder = Bidirectional(encoder)
+        encoders.append(encoder)
                         
     decoders = []
     for i in range(recurrent_layers):
-        decoders.append(GRU(recur_size, return_state=True, return_sequences=True, name=f'decoder{i}'))
+        decoder = GRU(
+            recur_size, return_state=True, 
+            return_sequences=True, name=f'decoder{i}')
+        decoders.append(decoder)
     
     word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', name='word_predictor')
     
     # Encode story.
     x = embedding_lookup(story_input)
-    get_last_time_step = Lambda(lambda t: t[:, -1,])
+    get_last_time_step = Lambda(lambda t: t[:, -1])
     encoder_states = []
     for encoder in encoders:
         x = encoder(x)  # <--- this is the line that causes seg fault.
-        # Here I'm slicing off the last time step to feed as the initial
-        # state to the decoder layers. I could get these back in the 
-        # correct shape via return_state=True param, but that doesn't 
-        # play nice with the bidirectional layer. Also, I'm assuming 
-        # that in keras's GRU implementation, output and state are the 
-        # same, which they are in the Colah blog post.
         if encoder is not encoders[-1]:
             encoder_state = get_last_time_step(x)
         else:
@@ -81,6 +71,10 @@ def build_baseline_model(story_length, question_length, answer_length,
         encoder_states.append(encoder_state)
     
     # Encode question.
+    
+    # TODO: Find out if state is retained in recurrent layers for 
+    # repeated uses within the same batch. If so, ww don't need to 
+    # pass in these 0s here.
     x = embedding_lookup(question_input)
     zeros = K.zeros_like(encoder_states[-1])
     state_1 = K.slice(zeros, (0, 0), (-1, recur_size // 2))
@@ -101,13 +95,13 @@ def build_baseline_model(story_length, question_length, answer_length,
     # Build training model.
     inputs = story_input, question_input, decoder_input
     train_model = Model(inputs=inputs, outputs=outputs)
-    train_model.compile(loss='sparse_categorical_crossentropy',
-                  optimizer='rmsprop',
-                  metrics=['accuracy'])
+    train_model.compile(
+        loss='sparse_categorical_crossentropy', 
+        optimizer='rmsprop', metrics=['accuracy'])
     
     # Build encoder model.
     inputs = story_input, question_input
-    outputs =  encoder_states + [encoded_question]
+    outputs = encoder_states + [encoded_question]
     encoder_model = Model(inputs=inputs, outputs=outputs)
     
     # Build decoder model.
@@ -124,10 +118,7 @@ def build_baseline_model(story_length, question_length, answer_length,
     for decoder, decoder_state_input in zip(decoders, decoder_state_inputs):
         x, decoder_state = decoder(x, initial_state=decoder_state_input)
         decoder_states.append(decoder_state)
-    # TODO: This accepts (?, ?, 256) and returns (?, 1, 10)... I'm sort of surprised
-    # that it works... shouldn't I need a time Distributed? maybe because it's just one?
     x = word_predictor(x)
-    
     
     inputs = [decoder_prev_predict_input, decoder_question_input] + decoder_state_inputs
     outputs = [x] + decoder_states
@@ -140,137 +131,12 @@ def build_baseline_model(story_length, question_length, answer_length,
 # DMN MODEL
 #
 
-    
-def build_dmn_model(story_length, question_length, answer_length, 
-                           embedding_matrix, recur_size=256, recurrent_layers=1,
-                           iterations=3, gate_dense_size=128, use_mem_gru=False):
-    
-    story_input = Input(shape=(story_length,), name='story_input')
-    question_input = Input(shape=(question_length,), name='question_input')
-    decoder_input = Input(shape=(answer_length,), name='decoder_input')
-    
-    embedding_lookup = Embedding(embedding_matrix.shape[0],
-                                 embedding_matrix.shape[1],
-                                 weights=[embedding_matrix],
-                                 trainable=False,
-                                 name='embedding_lookup')
-    
-    # Declare major layers.
-    input_gru = GRU(recur_size, return_sequences=True, return_state=True)
-    ep_gru = GRU(recur_size)
-    if use_mem_gru:
-        mem_gru = GRU(recur_size)
-    output_gru = GRU(recur_size, return_sequences=True, return_state=True)
-    gate_dense1 = Dense(gate_dense_size, activation='tanh')
-    gate_dense2 = Dense(1, activation='sigmoid')  # Sigmoid makes more sense.
-    word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', 
-                           name='word_predictor')
-    flatten = Flatten()
-    repeat_stroy_len_times = RepeatVector(story_length)
-    repeat_recur_size_times = RepeatVector(recur_size)
-    permute = Permute((2, 1))
-    repeat_once = RepeatVector(1)
-    # sum_along_last = Lambda(lambda t: K.sum(t, axis=-1, keepdims=True))
-    
-    # Encode story.
-    x = embedding_lookup(story_input)
-    fact_vectors, state = input_gru(x)
-    
-    # Set all steps in story but those at the end of a sentence
-    # to zeros.
-    # x = repeat_recur_size_times(story_mask_input)
-    # story_mask_weights = permute(x)
-    # fact_vectors = layers.multiply([fact_vectors, story_mask_weights])
-    
-    # Encode question.
-    x = embedding_lookup(question_input)
-    _, question_vector = input_gru(x, initial_state=K.zeros_like(state))
-    
-    # Generate memory vector.
-    memory_vector = question_vector    
-    question_vectors = repeat_stroy_len_times(question_vector)
-    pointwise1 = layers.multiply([fact_vectors, question_vectors])
-    delta1 = layers.subtract([fact_vectors, question_vectors])
-    delta1 = layers.multiply([delta1, delta1])
-    
-    for iteration in range(iterations):
-        # Calculate the weights for the gate vectors.
-        memory_vectors = repeat_stroy_len_times(memory_vector)
-        
-        pointwise2 = layers.multiply([fact_vectors, memory_vectors])
-        delta2 = layers.subtract([fact_vectors, memory_vectors])
-        delta2 = layers.multiply([delta2, delta2])
-        
-        # NOTE: This don't help, or at least isn't necessary.
-        # dot1 = sum_along_last(layers.multiply([fact_vectors, sim1(question_vectors)]))
-        # dot2 = sum_along_last(layers.multiply([fact_vectors, sim2(memory_vectors)]))
-        
-        gate_feature_vectors = concatenate([pointwise1, pointwise2, delta1, delta2])
 
-        x = gate_dense1(gate_feature_vectors)
-        x = gate_dense2(x)
-        x = flatten(x)
-        if iteration == 0:
-            hint_output = x
-        x = repeat_recur_size_times(x)
-        gate_weights = permute(x)
-    
-        # Calculate the episode vector for this iteration.
-        weighted_fact_vectors = layers.multiply([fact_vectors, gate_weights])
-        episode = ep_gru(weighted_fact_vectors)
-        if use_mem_gru:
-            episode = repeat_once(episode)
-            memory_vector = mem_gru(episode, initial_state=memory_vector)
-        else:
-            memory_vector = episode
-        
-    # Decode answer.    
-    repeated_question = RepeatVector(answer_length)(question_vector)
-    x = embedding_lookup(decoder_input)
-    x = concatenate([x, repeated_question])
-    x, _ = output_gru(x, initial_state=memory_vector)
-    answer_prediction = word_predictor(x)
-    
-    # Build training model.
-    inputs = story_input, question_input, decoder_input
-    outputs = answer_prediction, hint_output
-    train_model = Model(inputs=inputs, outputs=outputs)
-    train_model.compile(loss=['sparse_categorical_crossentropy', 'mse'],
-                              optimizer='rmsprop', metrics=['accuracy'])
-                      
-    # Build encoder model.
-    inputs = story_input, question_input
-    outputs =  [memory_vector, question_vector]
-    encoder_model = Model(inputs=inputs, outputs=outputs)
-    
-    # Build decoder model.
-    decoder_prev_predict_input = Input(shape=(1,), name='decoder_prev_predict_input')
-    decoder_question_input = Input(shape=(recur_size,), name='decoder_question_input')
-    decoder_state_inputs = [Input(shape=(recur_size,), name=f'decoder_state_input_{i}') 
-                            for i in range(recurrent_layers)]    
-    
-    x = embedding_lookup(decoder_prev_predict_input)
-    repeated_question = repeat_once(decoder_question_input)
-    x = concatenate([x, repeated_question])
-    
-    x, decoder_state = output_gru(x, initial_state=decoder_state_inputs[0])
-    x = word_predictor(x)
-    
-    inputs = [decoder_prev_predict_input, decoder_question_input] + decoder_state_inputs
-    outputs = [x, decoder_state]
-    decoder_model = Model(inputs=inputs, outputs=outputs)
-    
-    return train_model, encoder_model, decoder_model
-
-
-#
-# DMN MODEL VERSION 2
-#
-
-def build_dmn2_model(num_story_sentences, story_sentence_length, question_length, 
-                     answer_length, embedding_matrix, recur_size=256, recurrent_layers=1,
-                     iterations=3, gate_dense_size=128, use_mem_gru=False, gate_supervision=True,
-                     return_att_model=False, reuse_ep_encoder_state=False):
+def build_dmn_model(num_story_sentences, story_sentence_length, question_length, 
+                    answer_length, embedding_matrix, recur_size=256, 
+                    recurrent_layers=1, iterations=3, gate_dense_size=128, 
+                    use_mem_gru=False, gate_supervision=True,
+                    return_att_model=False, reuse_ep_encoder_state=False):
     
     story_sent_inputs = [Input(shape=(story_sentence_length,), name=f'story_sentence_{i}_input')
                          for i in range(num_story_sentences)]
@@ -283,8 +149,9 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
                                  trainable=False,
                                  name='embedding_lookup')
     
+    #
     # Declare reused layers.
-    # input_gru = GRU(recur_size, return_sequences=False, return_state=False)
+    #
     
     encoders = [] 
     for i in range(recurrent_layers):
@@ -297,10 +164,7 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
         ep_encoders.append(GRU(recur_size, return_sequences=return_seq, return_state=True, name=f'ep_encoder_{i}'))
     
     if use_mem_gru:
-        mem_dense1 = Dense(recur_size, activation='relu')
-        mem_dense2 = Dense(recur_size, activation='tanh')
-    
-    # output_gru = GRU(recur_size, return_sequences=True, return_state=True)
+        mem_gru = GRU(recur_size)
     
     decoders = []
     for i in range(recurrent_layers):
@@ -311,7 +175,6 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', 
                            name='word_predictor')
     flatten = Flatten()
-    # repeat_stroy_len_times = RepeatVector(story_length)
     repeat_recur_size_times = RepeatVector(recur_size)
     permute = Permute((2, 1))
     repeat_num_sents_times = RepeatVector(num_story_sentences)
@@ -339,7 +202,7 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     question_vector = x
     
     # Generate memory vector.
-    # memory_vectors = [question_vector] * recurrent_layers
+    
     per_layer_memory_vectors = [question_vector] * recur_size
     per_layer_episodes = [initial_state] * len(ep_encoders) 
     question_vectors = repeat_num_sents_times(question_vector)
@@ -354,10 +217,6 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
         pointwise2 = layers.multiply([merged_sents, memory_vectors])
         delta2 = layers.subtract([merged_sents, memory_vectors])
         delta2 = layers.multiply([delta2, delta2])
-        
-        # NOTE: This don't help, or at least isn't necessary.
-        # dot1 = sum_along_last(layers.multiply([fact_vectors, sim1(question_vectors)]))
-        # dot2 = sum_along_last(layers.multiply([fact_vectors, sim2(memory_vectors)]))
         
         gate_feature_vectors = concatenate([pointwise1, pointwise2, delta1, delta2])
         x = gate_dense1(gate_feature_vectors)
@@ -378,12 +237,14 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
             new_per_layer_episodes.append(episode)
         per_layer_episodes = new_per_layer_episodes
         
+        # TODO: If you're using the multi-layer and mem_gru options
+        # together, the way the mem_gru is resused here is not ideal.
+        
         if use_mem_gru:
             new_per_layer_memory_vectors = []
             for memory_vector, episode in zip(per_layer_memory_vectors, per_layer_episodes):
-                x = concatenate([memory_vector, episode])
-                x = mem_dense1(x)
-                memory_vector = mem_dense2(x)
+                episode = repeat_once(episode)
+                memory_vector = mem_gru(episode, initial_state=memory_vector)
                 new_per_layer_memory_vectors.append(memory_vector)
             per_layer_memory_vectors = new_per_layer_memory_vectors
         else:
@@ -393,7 +254,6 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     repeated_question = RepeatVector(answer_length)(question_vector)
     x = embedding_lookup(decoder_input)
     x = concatenate([x, repeated_question])
-    
     for decoder, memory_vector in zip(decoders, per_layer_memory_vectors):
         x, _ = decoder(x, initial_state=memory_vector)
     answer_prediction = word_predictor(x)
@@ -410,10 +270,11 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
                       
     # Build encoder model.
     inputs = story_sent_inputs + [question_input]
-    outputs =  per_layer_memory_vectors + [question_vector]
+    outputs = per_layer_memory_vectors + [question_vector]
     encoder_model = Model(inputs=inputs, outputs=outputs)
     
     # Build decoder model.
+    
     decoder_prev_predict_input = Input(shape=(1,), name='decoder_prev_predict_input')
     decoder_question_input = Input(shape=(recur_size,), name='decoder_question_input')
     decoder_state_inputs = [Input(shape=(recur_size,), name=f'decoder_state_input_{i}') 
@@ -445,154 +306,6 @@ def build_dmn2_model(num_story_sentences, story_sentence_length, question_length
     
 
 #
-# DMN 3 MODEL
-#
-
-def build_dmn3_model(num_story_sentences, story_sentence_length, question_length, 
-                     answer_length, embedding_matrix, recur_size=128, recurrent_layers=1,
-                     iterations=3, gate_dense_size=128, use_mem_gru=False, gate_supervision=True,
-                     return_att_model=False):
-    
-    story_sent_inputs = [Input(shape=(story_sentence_length,), name=f'story_sentence_{i}_input')
-                         for i in range(num_story_sentences)]
-    question_input = Input(shape=(question_length,), name='question_input')
-    decoder_input = Input(shape=(answer_length,), name='decoder_input')
-    
-    embedding_lookup = Embedding(embedding_matrix.shape[0],
-                                 embedding_matrix.shape[1],
-                                 weights=[embedding_matrix],
-                                 trainable=False,
-                                 name='embedding_lookup')
-    
-    # Declare reused layers.
-    # input_gru = GRU(recur_size, return_sequences=False, return_state=False)
-    
-    encoders = [] 
-    for i in range(recurrent_layers):
-        return_seq = False if i == recurrent_layers - 1 else True
-        encoders.append(GRU(recur_size, return_sequences=return_seq, return_state=True, name=f'encoder_{i}'))
-    
-    ep_encoders = [] 
-    for i in range(recurrent_layers):
-        return_seq = False if i == recurrent_layers - 1 else True
-        ep_encoders.append(GRU(recur_size, return_sequences=return_seq, return_state=True, name=f'ep_encoder_{i}'))
-    
-    decoders = []
-    for i in range(recurrent_layers):
-        decoders.append(GRU(recur_size, return_state=True, return_sequences=True, name=f'decoder_{i}'))
-    
-    gate_dense1 = Dense(gate_dense_size, activation='tanh')
-    gate_dense2 = Dense(1, activation='sigmoid')  # Sigmoid makes more sense.
-    word_predictor = Dense(embedding_matrix.shape[0], activation='softmax', 
-                           name='word_predictor')
-    flatten = Flatten()
-    # repeat_stroy_len_times = RepeatVector(story_length)
-    repeat_recur_size_times = RepeatVector(recur_size)
-    permute = Permute((2, 1))
-    repeat_num_sents_times = RepeatVector(num_story_sentences)
-    repeat_once = RepeatVector(1)
-    
-    # Encode story sents.
-    initial_state = None
-    encoded_sents = []
-    for sent in story_sent_inputs:
-        x = embedding_lookup(sent)
-        for encoder in encoders:
-            x, state = encoder(x, initial_state)
-            if initial_state is None:
-                initial_state = K.zeros_like(state)
-        encoded_sents.append(x)
-    
-    # Merge encoded sents.
-    reshaped_sents = [repeat_once(sent) for sent in encoded_sents]
-    merged_sents = concatenate(reshaped_sents, axis=1)
-        
-    # Encode question.
-    x = embedding_lookup(question_input)    
-    for encoder in encoders:
-        x, _ = encoder(x, initial_state=initial_state)
-    question_vector = x
-    
-    attention_encoder = GRU(recur_size)
-    attention_decoder = Dense(num_story_sentences, activation='sigmoid')
-    
-    attention_encoders = []
-    for i in range(recurrent_layers):
-        return_seq = False if i == recurrent_layers - 1 else True
-        attention_encoders.append(GRU(recur_size, return_sequences=return_seq, name=f'attention_encoder_{i}'))
-    
-    question_vectors = repeat_num_sents_times(question_vector)
-    x = concatenate([merged_sents, question_vectors])
-    
-    for attention_encoder in attention_encoders:
-        x = attention_encoder(x)
-    
-    x = attention_decoder(x)
-    attention_output = x
-    x = repeat_recur_size_times(x)
-    gate_weights = permute(x)
-    x = layers.multiply([merged_sents, gate_weights])
-    
-    per_layer_memory_vectors = []
-    for ep_encoder in ep_encoders:
-        x, episode = ep_encoder(x, initial_state=initial_state)
-        per_layer_memory_vectors.append(episode)
-    
-    # Decode answer.    
-    repeated_question = RepeatVector(answer_length)(question_vector)
-    x = embedding_lookup(decoder_input)
-    x = concatenate([x, repeated_question])
-    
-    for decoder, memory_vector in zip(decoders, per_layer_memory_vectors):
-        x, _ = decoder(x, initial_state=memory_vector)
-    answer_prediction = word_predictor(x)
-    
-    # Build training model.
-    inputs = story_sent_inputs + [question_input, decoder_input]
-    outputs = [answer_prediction]
-    losses = ['sparse_categorical_crossentropy']
-    if gate_supervision:
-        outputs.append(attention_output)
-        losses.append('binary_crossentropy')
-    train_model = Model(inputs=inputs, outputs=outputs)
-    train_model.compile(loss=losses, optimizer='rmsprop', metrics=['accuracy'])
-                      
-    # Build encoder model.
-    inputs = story_sent_inputs + [question_input]
-    outputs =  per_layer_memory_vectors + [question_vector]
-    encoder_model = Model(inputs=inputs, outputs=outputs)
-    
-    # Build decoder model.
-    decoder_prev_predict_input = Input(shape=(1,), name='decoder_prev_predict_input')
-    decoder_question_input = Input(shape=(recur_size,), name='decoder_question_input')
-    decoder_state_inputs = [Input(shape=(recur_size,), name=f'decoder_state_input_{i}') 
-                            for i in range(recurrent_layers)]    
-    
-    x = embedding_lookup(decoder_prev_predict_input)
-    repeated_question = repeat_once(decoder_question_input)
-    x = concatenate([x, repeated_question])
-    
-    decoder_states = []
-    for decoder, decoder_state_input in zip(decoders, decoder_state_inputs):
-        x, decoder_state = decoder(x, initial_state=decoder_state_input)
-        decoder_states.append(decoder_state)
-    x = word_predictor(x)
-    
-    inputs = [decoder_prev_predict_input, decoder_question_input] + decoder_state_inputs
-    outputs = [x] + decoder_states
-    decoder_model = Model(inputs=inputs, outputs=outputs)
-    
-    models = [train_model, encoder_model, decoder_model]
-    
-    # Build attention mdoel.
-    if return_att_model:
-        inputs = story_sent_inputs + [question_input]
-        att_model = Model(inputs=inputs, outputs=[attention_output])
-        models.append(att_model)
-    
-    return models
-
-#
 # SHARED UTILS
 #
 
@@ -606,19 +319,17 @@ def model_is_sent_level(model):
 
 def build_encoder_inputs(encoder_model, stories, questions):
     encoder_inputs = {}
-    
     if model_is_sent_level(encoder_model):
         for i in range(stories.shape[1]):
             encoder_inputs[f'story_sentence_{i}_input'] = stories[:, i]
     else:
         encoder_inputs['story_input'] = stories
-    
     encoder_inputs['question_input'] = questions
-    
     return encoder_inputs
     
 
-def predict(encoder_model, decoder_model, stories, questions, max_answer_length, story_masks=None):
+def predict(encoder_model, decoder_model, stories, questions, 
+            max_answer_length, story_masks=None):
     """Returns the predictions as indicies."""
     
     encoder_inputs = build_encoder_inputs(encoder_model, stories, questions)
@@ -645,7 +356,8 @@ def predict(encoder_model, decoder_model, stories, questions, max_answer_length,
     return np.concatenate(pred_list, axis=-1)
     
     
-def get_attention_info(encoder_model, decoder_model, attention_model, story, question, answer, y_att, id_to_word):
+def get_attention_info(encoder_model, decoder_model, attention_model, 
+                       story, question, answer, y_att, id_to_word):
 
     stories = story[np.newaxis, :]
     questions = question[np.newaxis, :]
@@ -673,13 +385,15 @@ def get_attention_info(encoder_model, decoder_model, attention_model, story, que
     df = pd.DataFrame(rows, columns=columns)
     
     qa = pd.DataFrame(
-        [question_str, answer_str, predicted_answer_str], index=['question', 'answer', 'pred_answer'], 
+        [question_str, answer_str, predicted_answer_str], 
+        index=['question', 'answer', 'pred_answer'], 
         columns=[''])
     
     return df, qa
     
 
-def debug_attention(encoder_model, decoder_model, attention_model, data_bunch, data_set, question_index):
+def debug_attention(encoder_model, decoder_model, attention_model, 
+                    data_bunch, data_set, question_index, save_results=False):
     
     story = data_bunch[f'X_{data_set}_story_sents'][question_index]
     question = data_bunch[f'X_{data_set}_questions'][question_index]
@@ -698,6 +412,12 @@ def debug_attention(encoder_model, decoder_model, attention_model, data_bunch, d
     
     print(att_info)
     print(qa_info)
+    
+    if save_results is not None:
+        att_path = os.path.join(data_dir_path, 'attention_info.csv')
+        att_info.to_csv(att_path)
+        qa_path = os.path.join(data_dir_path, 'question_answer_info.csv')
+        qa_info.to_csv(qa_path)
 
 
 def train_model(model, train_data, epochs):
@@ -739,7 +459,7 @@ def train_model(model, train_data, epochs):
             y_val.append(train_data.X_val_hints)
     
     # Train the model.
-    model.fit(X_train, y_train, batch_size=128, epochs=epochs,
+    model.fit(X_train, y_train, batch_size=64, epochs=epochs,
               validation_data=(X_val, y_val),
               callbacks=[checkpointer])
 

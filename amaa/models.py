@@ -30,8 +30,35 @@ data_dir_path = os.path.join(os.path.dirname(__file__), 'data')
 
 
 def build_baseline_model(story_length, question_length, answer_length, 
-                         embedding_matrix, recur_size=256, recurrent_layers=1):        
-    
+                         embedding_matrix, recur_size=256, recurrent_layers=1):
+    """
+    Build and return the baseline sequence-to-sequence model.
+
+    In this model, the both the story and the question are encoded using
+    the same multi-layer GRU based encoder. The state of the encoder is
+    then passed off to a similar decoder which takes as input the question
+    vector and the previous word in the answer and predicts the next word
+    in the answer.
+
+    Args:
+        story_length: The number of tokens in each story.
+        question_length: The number of tokens in each question.
+        answer_length: The number of tokens in each answer.
+        embedding_matrix: A numpy matrix with shape 
+            `(vocab_size, embedding_size)`
+        recur_size: The size of the hidden space used by the recurrent
+            layers.
+        recurrent_layers: The number of stacked recurrent layers to use.
+
+    Returns:
+        (tuple): tuple containing:
+            train_model: The Keras model used to train the weights.
+            encoder_model: The Keras model used to encode input during
+                prediction.
+            decoder_model: The Keras model used to decode input during
+                prediction.
+
+    """
     story_input = Input(shape=(story_length,), name='story_input')
     question_input = Input(shape=(question_length,), name='question_input')
     
@@ -137,7 +164,55 @@ def build_dmn_model(num_story_sentences, story_sentence_length, question_length,
                     recurrent_layers=1, iterations=3, gate_dense_size=128, 
                     use_mem_gru=False, gate_supervision=True,
                     return_att_model=False, reuse_ep_encoder_state=False):
-    
+    """
+    Build and return a Dynamic Memory Network.
+
+    For details on this architechture, plese see:
+    https://arxiv.org/abs/1506.07285.
+
+    Args:
+        num_story_sentences: The number of sentences in the story.
+        story_sentence_length: The number of tokens in each of those
+            sentences.
+        question_length: The number of tokens in each question.
+        answer_length: The number of tokens in each answer.
+        embedding_matrix: A numpy matrix with shape
+            `(vocab_size, embedding_size)`
+        recur_size: The size of the hidden space used by the recurrent
+            layers.
+        recurrent_layers: The number of stacked recurrent layers to use.
+        iterations: The number of passes the episode generating GRU
+            makes over the input.
+        gate_dense_size: The number of hidden units in the dense network
+             that generates the attention gate weights.
+        use_mem_gru: Whether or not to consolidate the episodic memories
+            into a memory vector that is retained after each iteration.
+            This is how they did it in the paper, but I found the network
+            converged faster without it. Defaults to `False`.
+        gate_supervision: Whether to build the network so that the
+            gate weights of the final iteration are part of the output
+            and loss function for the training model. If this option is
+            used, the correct gate weights must be passed in during
+            training. Defaults to `True`.
+        return_att_model: Return an additional model that can but used
+            to get the attention weights during prediction. These
+            you to debug/visualize the attention gate weights on
+            arbitrary inputs.  Defaults to `False`.
+        reuse_ep_encoder_state: Whether or not to reset the state of
+            the episode generating GRU after each iteration. Defaults
+            to `False`.
+
+    Returns:
+        (tuple): tuple containing:
+            train_model: The Keras model used to train the weights.
+            encoder_model: The Keras model used to encode input during
+                prediction.
+            decoder_model: The Keras model used to decode input during
+                prediction.
+            attention_model: Optionally, a model that can output the
+                attention gate weights for arbitrary input.
+
+    """
     story_sent_inputs = [Input(shape=(story_sentence_length,), name=f'story_sentence_{i}_input')
                          for i in range(num_story_sentences)]
     question_input = Input(shape=(question_length,), name='question_input')
@@ -148,27 +223,28 @@ def build_dmn_model(num_story_sentences, story_sentence_length, question_length,
                                  weights=[embedding_matrix],
                                  trainable=False,
                                  name='embedding_lookup')
-    
-    #
+
     # Declare reused layers.
-    #
     
     encoders = [] 
     for i in range(recurrent_layers):
         return_seq = False if i == recurrent_layers - 1 else True
-        encoders.append(GRU(recur_size, return_sequences=return_seq, return_state=True, name=f'encoder_{i}'))
+        encoders.append(GRU(recur_size, return_sequences=return_seq,
+                            return_state=True, name=f'encoder_{i}'))
     
     ep_encoders = [] 
     for i in range(recurrent_layers):
         return_seq = False if i == recurrent_layers - 1 else True
-        ep_encoders.append(GRU(recur_size, return_sequences=return_seq, return_state=True, name=f'ep_encoder_{i}'))
+        ep_encoders.append(GRU(recur_size, return_sequences=return_seq,
+                               return_state=True, name=f'ep_encoder_{i}'))
     
     if use_mem_gru:
         mem_gru = GRU(recur_size)
     
     decoders = []
     for i in range(recurrent_layers):
-        decoders.append(GRU(recur_size, return_state=True, return_sequences=True, name=f'decoder_{i}'))
+        decoders.append(GRU(recur_size, return_state=True,
+                            return_sequences=True, name=f'decoder_{i}'))
     
     gate_dense1 = Dense(gate_dense_size, activation='tanh')
     gate_dense2 = Dense(1, activation='sigmoid')  # Sigmoid makes more sense.
@@ -311,6 +387,7 @@ def build_dmn_model(num_story_sentences, story_sentence_length, question_length,
 
 
 def model_is_sent_level(model):
+    """Returns whether the model has different inputs for each story sentence."""
     for input in model.inputs:
         if 'sentence' in input.name:
             return True
@@ -328,31 +405,31 @@ def build_encoder_inputs(encoder_model, stories, questions):
     return encoder_inputs
     
 
-def predict(encoder_model, decoder_model, stories, questions, 
+def predict(encoder_model, decoder_model, stories, questions,
             max_answer_length, story_masks=None):
     """Returns the predictions as indicies."""
-    
+
     encoder_inputs = build_encoder_inputs(encoder_model, stories, questions)
-    
+
     *encoded_stories, encoded_questions = encoder_model.predict(encoder_inputs)
     batch_size = encoded_stories[0].shape[0]
     preds = np.zeros((batch_size, 1)) + 2  # 2 == <START>
     decoder_states = encoded_stories
     pred_list = []
     for i in range(max_answer_length):
-        
+
         decoder_inputs = {
-            'decoder_prev_predict_input': preds, 
+            'decoder_prev_predict_input': preds,
             'decoder_question_input': encoded_questions
         }
-        
+
         for j, decoder_input in enumerate(decoder_states):
             decoder_inputs[f'decoder_state_input_{j}'] = decoder_input
-        
+
         preds, *decoder_states = decoder_model.predict(decoder_inputs)
         preds = np.argmax(preds, axis=-1)
         pred_list.append(preds)
-    
+
     return np.concatenate(pred_list, axis=-1)
     
     
@@ -399,8 +476,6 @@ def debug_attention(encoder_model, decoder_model, attention_model,
     question = data_bunch[f'X_{data_set}_questions'][question_index]
     answer = data_bunch[f'y_{data_set}'][question_index]
     y_att = data_bunch[f'y_{data_set}_att'][question_index]
-    question_str = data.ids_to_text(question, data_bunch.id_to_word)
-    answer_str = data.ids_to_text(answer, data_bunch.id_to_word)
     
     att_info, qa_info = get_attention_info(
         encoder_model, decoder_model, attention_model, story, question,

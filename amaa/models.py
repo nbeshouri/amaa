@@ -169,7 +169,7 @@ def build_dmn_model(num_story_sentences, story_sentence_length, question_length,
     """
     Build and return a Dynamic Memory Network.
 
-    For details on this architechture, plese see:
+    For details on this architecture, please see:
     https://arxiv.org/abs/1506.07285.
 
     Args:
@@ -527,7 +527,6 @@ def debug_attention(encoder_model, decoder_model, attention_model,
 
 
 def train_model(model, train_data, epochs):
-    # Train 
     checkpoint_path = os.path.join(data_dir_path, f'temp_weights_{socket.gethostname()}.hdf5')    
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)

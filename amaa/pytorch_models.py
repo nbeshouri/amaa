@@ -135,15 +135,20 @@ class DMNEncoder(nn.Module):
         # Encode stories.
         x = self.embeddings(x_stories)
         encoded_stories, _ = self.encoder(x)
-        sent_counts = np.sum(np.array(x_story_masks), axis=1)
-        masked_outputs = encoded_stories[x_story_masks]
+        sent_counts = np.sum(np.array(x_story_masks), axis=1)  # (batch_size,)
+        masked_outputs = encoded_stories[x_story_masks]  # (num_sents_in_batch, recur_size)
 
-        encoded_story_sents = torch.zeros(  # (batch_size, num_sents, recur_size)
+        encoded_story_sents = torch.zeros(  # (batch_size, max_num_sents, recur_size)
             x_stories.size(0),
             max(sent_counts),
             self.recur_size,
             dtype=torch.float)
 
+        # `masked_outputs` is a flat tensor of encoded sentences that
+        # have been selected with boolean masking. Here we unravel those
+        # a `(batch_size, max_num_sents, recur_size)` tensor for encoding
+        # into episode vectors. They can't just be reshaped because the 
+        # size of the array is changing.
         masked_sent_index = 0
         for story_id, sent_count in enumerate(sent_counts):
             for sent_id in range(sent_count):
@@ -168,11 +173,15 @@ class DMNEncoder(nn.Module):
                 [pointwise1, pointwise2, delta1, delta2], dim=2)
             x = self.gate_linear(feature_vectors)  # (batch_size, max_sents, 1)
             gate_weights = torch.sigmoid(x)
-            gate_weights = gate_weights.squeeze(2)
+            gate_weights = gate_weights.squeeze(2)  # (batch_size, max_sents)
             episode_vecs, ep_encoder_state = self.ep_encoder(encoded_story_sents, gate_weights)
             episode_vecs = episode_vecs[:, -1, :]
+            # TODO: I'm just selecting the last timestep. I should
+            # be selecting the value at the last timestep with input. Or
+            # I could them into a packed sequence...
 
-            # Not using a different memory vec encoder...
+            # TODO: Here, I'm totally ignoring the separate memory 
+            # encoder. It should probably be optional.
             memory_vecs = episode_vecs.unsqueeze(1)  # (batch_size, 1, recur_size)
             mem_encoder_state = ep_encoder_state
 
